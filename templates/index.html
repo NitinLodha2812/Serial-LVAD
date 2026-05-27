@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Serial LVAD Study</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
+</head>
+<body>
+
+  <!-- ── HEADER ── -->
+  <header class="app-header">
+    <div class="logo">Serial LVAD Study <span>v10</span></div>
+    <div class="meta-bar">
+      <div class="meta-field">
+        <label>Patient</label>
+        <input type="text" id="patientId" placeholder="—" disabled>
+      </div>
+      <div class="meta-field">
+        <label>Session</label>
+        <input type="text" id="sessionId" placeholder="—" disabled>
+      </div>
+      <div class="meta-field">
+        <label>Vessel</label>
+        <select id="vesselSelect" disabled>
+          <option value="MCA">MCA</option>
+          <option value="PCA">PCA</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── TABS ── -->
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="main">Main Screen</button>
+    <button class="tab-btn" data-tab="ca">CA (MX)</button>
+    <button class="tab-btn" data-tab="cvr">CVR</button>
+  </nav>
+
+  <!-- ════════════════════ MAIN TAB ════════════════════ -->
+  <section id="tab-main" class="tab-panel active">
+    <div class="main-grid">
+
+      <!-- load / save -->
+      <div class="card">
+        <div class="card-header"><h3>Load &amp; Save</h3></div>
+        <div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-primary" id="loadBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Load File (.txt / .csv)
+            </button>
+            <input type="file" id="fileInput" accept=".txt,.csv" style="display:none;">
+          <select id="saveFormat" class="btn" disabled>
+            <option value="excel">Save: Excel (Unified)</option>
+            <option value="json">Save: JSON (Progress)</option>
+          </select>
+          <button class="btn" id="saveBtn" disabled>Save</button>
+        </div>
+      </div>
+
+      <!-- instructions -->
+      <div class="card">
+        <div class="card-header"><h3>Instructions</h3></div>
+        <div class="card-body instructions-box">
+          <strong>1.</strong> Load a raw data file (.txt or .csv comma-delimited).<br>
+          <strong>2.</strong> The <strong>CA</strong> tab lets you select a 5-minute window and compute MX index.<br>
+          <strong>3.</strong> The <strong>CVR</strong> tab lets you select baseline (~32 s) and hypercapnia (~10 s) windows, detect peak etCO2, and compute CVR.<br>
+          <strong>4.</strong> Choose <strong>MCA</strong> or <strong>PCA</strong> vessel before calculating. Repeat for both.<br>
+          <strong>5.</strong> Save results as a unified Excel workbook or JSON progress file.
+        </div>
+      </div>
+
+      <!-- log -->
+      <div class="card full">
+        <div class="card-header"><h3>Activity Log</h3></div>
+        <div class="card-body">
+          <div class="log-box" id="logBox">Session started. Load a file to begin.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════ CA TAB ════════════════════ -->
+  <section id="tab-ca" class="tab-panel">
+    <div class="analysis-layout">
+      <div class="plots-area">
+        <div class="plot-card">
+          <div class="plot-title">TCD envU (cm/s²)</div>
+          <div class="plot-wrap"><canvas id="caPlot1"></canvas></div>
+        </div>
+        <div class="plot-card">
+          <div class="plot-title">ABP (mmHg)</div>
+          <div class="plot-wrap"><canvas id="caPlot2"></canvas></div>
+        </div>
+      </div>
+      <div class="controls-sidebar">
+        <button class="btn btn-primary" id="caSelectBtn" disabled>Select Start (5-min)</button>
+        <button class="btn btn-danger" id="caClearBtn" disabled>Clear Selection</button>
+        <button class="btn" id="caCalcBtn" disabled>Calculate MX</button>
+        <div class="section-divider"></div>
+        <select class="btn" id="caZoomMenu" disabled>
+          <option value="zoomX">Zoom X</option>
+          <option value="zoomY">Zoom Y</option>
+          <option value="home">Zoom Home</option>
+          <option value="scale5">Scale to 5 min</option>
+        </select>
+        <button class="btn btn-sm" id="caZoomBtn" disabled>Apply Zoom</button>
+        <div class="section-divider"></div>
+        <div class="marks-panel" id="caMarksPanel">
+          <div class="marks-header">Marks</div>
+          <div class="marks-list" id="caMarksList"></div>
+        </div>
+        <div id="caResultBox" class="hidden">
+          <div class="result-box">
+            <div class="result-label">MX Index</div>
+            <div class="result-value" id="caResultValue">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════ CVR TAB ════════════════════ -->
+  <section id="tab-cvr" class="tab-panel">
+    <div class="analysis-layout">
+      <div class="plots-area">
+        <div class="plot-card">
+          <div class="plot-title">TCD meanU</div>
+          <div class="plot-wrap short"><canvas id="cvrPlot1"></canvas></div>
+        </div>
+        <div class="plot-card">
+          <div class="plot-title">TCD envU</div>
+          <div class="plot-wrap short"><canvas id="cvrPlot2"></canvas></div>
+        </div>
+        <div class="plot-card">
+          <div class="plot-title">ETCO2</div>
+          <div class="plot-wrap short"><canvas id="cvrPlot3"></canvas></div>
+        </div>
+      </div>
+      <div class="controls-sidebar">
+        <button class="btn btn-primary" id="cvrSelectBaseBtn" disabled>Select Baseline Start</button>
+        <button class="btn btn-primary" id="cvrSelectHypBtn" disabled>Select Hypercapnia Start</button>
+        <button class="btn btn-danger" id="cvrClearBtn" disabled>Clear Selection</button>
+        <button class="btn" id="cvrCalcBtn" disabled>Calculate CVR</button>
+        <button class="btn btn-sm" id="cvrPeakBtn" disabled>Detect Peak etCO2</button>
+        <div class="section-divider"></div>
+        <select class="btn" id="cvrZoomMenu" disabled>
+          <option value="zoomX">Zoom X</option>
+          <option value="zoomY">Zoom Y</option>
+          <option value="home">Zoom Home</option>
+          <option value="scale5">Scale to 5 min</option>
+        </select>
+        <button class="btn btn-sm" id="cvrZoomBtn" disabled>Apply Zoom</button>
+        <div class="section-divider"></div>
+        <div class="marks-panel" id="cvrMarksPanel">
+          <div class="marks-header">Marks</div>
+          <div class="marks-list" id="cvrMarksList"></div>
+        </div>
+        <div id="cvrResultBox" class="hidden">
+          <div class="result-grid">
+            <div class="result-box">
+              <div class="result-label">MCVR</div>
+              <div class="result-value" id="cvrMCVR">—</div>
+            </div>
+            <div class="result-box">
+              <div class="result-label">WCVR</div>
+              <div class="result-value" id="cvrWCVR">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- status bar -->
+  <footer class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">No file loaded</span>
+    <span class="status-right" id="statusRight">125 Hz</span>
+  </footer>
+
+  <!-- toast container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- loading overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+  </div>
+
+  <!-- JS modules -->
+  <script src="/static/js/charts.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
