@@ -27,6 +27,172 @@ function xyData(timeArr, valArr) {
   return pts;
 }
 
+/* ══════════════════ BRUSH PLUGIN (rectangle draw) ══════════════════ */
+/* Draws the in-progress brush rectangle stored on `chart.$brush`. One
+   instance registered globally; it ignores charts that aren't brushing. */
+const brushDrawPlugin = {
+  id: 'brushOverlay',
+  afterDraw(chart) {
+    const b = chart.$brush;
+    if (!b || !b.dragging || !b.startPx || !b.endPx) return;
+    const a = b.startPx, c = b.endPx;
+    const x = Math.min(a.x, c.x), y = Math.min(a.y, c.y);
+    const w = Math.abs(c.x - a.x), h = Math.abs(c.y - a.y);
+    if (w < 1 && h < 1) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.fillStyle = 'rgba(231, 76, 60, 0.15)';
+    ctx.strokeStyle = 'rgba(231, 76, 60, 0.85)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+  },
+};
+if (typeof Chart !== 'undefined') Chart.register(brushDrawPlugin);
+
+/* ══════════════════ BRUSH CONTROLLER ══════════════════ */
+/* Attach drag-rectangle brushing to a single Chart.js chart.
+   `signal` is the backend name (mean_u / env_u / etco2 / abp).
+   `onChange(state)` fires whenever the brushed-points set changes,
+   so the host app can enable/disable "Replace with NaN" buttons. */
+function attachBrush(chart, signal, onChange) {
+  if (!chart || chart.$brush) return;
+  chart.$brush = {
+    signal,
+    active: false,        // brush-mode toggle
+    dragging: false,
+    startPx: null,        // canvas pixels at mousedown
+    endPx: null,
+    rect: null,           // data-coords {x_min, x_max, y_min, y_max}
+    onChange: onChange || (() => {}),
+  };
+  const canvas = chart.canvas;
+
+  function mousedown(e) {
+    if (!chart.$brush.active) return;
+    if (e.button !== 0) return;            // left click only
+    e.preventDefault();
+    const r = canvas.getBoundingClientRect();
+    chart.$brush.dragging = true;
+    chart.$brush.startPx = { x: e.clientX - r.left, y: e.clientY - r.top };
+    chart.$brush.endPx   = { ...chart.$brush.startPx };
+  }
+  function mousemove(e) {
+    if (!chart.$brush.dragging) return;
+    const r = canvas.getBoundingClientRect();
+    chart.$brush.endPx = { x: e.clientX - r.left, y: e.clientY - r.top };
+    chart.draw();
+  }
+  function mouseup(e) {
+    if (!chart.$brush.dragging) return;
+    chart.$brush.dragging = false;
+    const a = chart.$brush.startPx, c = chart.$brush.endPx;
+    if (!a || !c) return;
+    if (Math.abs(c.x - a.x) < 3 && Math.abs(c.y - a.y) < 3) {
+      // click, not a drag — ignore
+      chart.draw();
+      return;
+    }
+    const xs = chart.scales.x, ys = chart.scales.y;
+    let x_min = xs.getValueForPixel(Math.min(a.x, c.x));
+    let x_max = xs.getValueForPixel(Math.max(a.x, c.x));
+    let y_min = ys.getValueForPixel(Math.max(a.y, c.y));   // pixel-y inverted
+    let y_max = ys.getValueForPixel(Math.min(a.y, c.y));
+    if (x_max < x_min) [x_min, x_max] = [x_max, x_min];
+    if (y_max < y_min) [y_min, y_max] = [y_max, y_min];
+    chart.$brush.rect = { x_min, x_max, y_min, y_max };
+    _refreshBrushedOverlay(chart);
+    chart.$brush.onChange({ hasBrush: true, signal: chart.$brush.signal, rect: chart.$brush.rect });
+  }
+  function mouseleave() {
+    if (chart.$brush.dragging) {
+      chart.$brush.dragging = false;
+      chart.draw();
+    }
+  }
+
+  canvas.addEventListener('mousedown', mousedown);
+  canvas.addEventListener('mousemove', mousemove);
+  canvas.addEventListener('mouseup',   mouseup);
+  canvas.addEventListener('mouseleave', mouseleave);
+}
+
+/* Rebuild the red-dot dataset showing which 'main' points fall in the
+   current brush rectangle. Only the points from the chart's primary
+   (non-overlay) line are eligible — selection/baseline/hypercapnia
+   overlays are ignored. */
+function _refreshBrushedOverlay(chart) {
+  if (!chart || !chart.$brush) return;
+  // Strip prior overlay
+  chart.data.datasets = chart.data.datasets.filter(d => d.label !== '_brushed');
+  const rect = chart.$brush.rect;
+  if (!rect) { chart.update('none'); return; }
+  // The chart's primary trace is whichever dataset was added first.
+  const mainDs = chart.data.datasets[0];
+  if (!mainDs || !Array.isArray(mainDs.data)) { chart.update('none'); return; }
+  const inside = mainDs.data.filter(p =>
+    p && p.y != null &&
+    p.x >= rect.x_min && p.x <= rect.x_max &&
+    p.y >= rect.y_min && p.y <= rect.y_max);
+  chart.data.datasets.push({
+    label: '_brushed',
+    data: inside,
+    pointRadius: 4,
+    pointHoverRadius: 4,
+    pointBackgroundColor: '#E74C3C',
+    pointBorderColor: '#E74C3C',
+    borderColor: 'rgba(231,76,60,0)',
+    showLine: false,
+    order: -1,     // drawn on top
+  });
+  chart.update('none');
+}
+
+/* Toggle brush mode on a chart. When ON, zoom-wheel & shift-pan are
+   disabled so the drag interaction is unambiguous. */
+function setChartBrushMode(chart, on) {
+  if (!chart || !chart.$brush) return;
+  chart.$brush.active = !!on;
+  const z = chart.options?.plugins?.zoom;
+  if (z) {
+    z.zoom.wheel.enabled = !on;
+    z.pan.enabled = !on;
+  }
+  chart.canvas.style.cursor = on ? 'crosshair' : '';
+  chart.update('none');
+}
+
+function clearChartBrush(chart) {
+  if (!chart || !chart.$brush) return;
+  chart.$brush.rect = null;
+  chart.$brush.startPx = chart.$brush.endPx = null;
+  chart.data.datasets = chart.data.datasets.filter(d => d.label !== '_brushed');
+  chart.update('none');
+  chart.$brush.onChange({ hasBrush: false, signal: chart.$brush.signal, rect: null });
+}
+
+/* Locally apply NaN to the brushed points on the primary trace so the
+   user sees the gap immediately. The backend has the authoritative copy. */
+function applyNaNToChartLocally(chart) {
+  if (!chart || !chart.$brush || !chart.$brush.rect) return 0;
+  const rect = chart.$brush.rect;
+  const mainDs = chart.data.datasets[0];
+  if (!mainDs) return 0;
+  let n = 0;
+  for (const p of mainDs.data) {
+    if (p && p.y != null &&
+        p.x >= rect.x_min && p.x <= rect.x_max &&
+        p.y >= rect.y_min && p.y <= rect.y_max) {
+      p.y = null;   // null breaks the line at this x
+      n++;
+    }
+  }
+  clearChartBrush(chart);
+  return n;
+}
+
 /* ── build annotation lines for marks ── */
 function markAnnotations(labels, times, visible) {
   const ann = {};
@@ -112,6 +278,7 @@ class CACharts {
     this.chart1 = null;
     this.chart2 = null;
     this.marksVisible = new Set();
+    this.onBrushChange = () => {};   // host sets this to track brush state
   }
 
   init(data) {
@@ -134,8 +301,42 @@ class CACharts {
       options: makeChartOptions('mmHg', { ...ann }),
     });
 
+    const onBrush = (active) => (s) => {
+      // Only one chart may be brushed at a time — clear the others.
+      if (s.hasBrush) {
+        for (const c of [this.chart1, this.chart2]) {
+          if (c && c !== active && c.$brush && c.$brush.rect) clearChartBrush(c);
+        }
+      }
+      this.onBrushChange(s);
+    };
+    attachBrush(this.chart1, 'env_u', onBrush(this.chart1));
+    attachBrush(this.chart2, 'abp',   onBrush(this.chart2));
+
     this._syncZoom();
     this.data = data;
+  }
+
+  // ── brush API used by app.js ──
+  setBrushMode(on) {
+    setChartBrushMode(this.chart1, on);
+    setChartBrushMode(this.chart2, on);
+  }
+  activeBrush() {
+    // Returns {chart, signal, rect} for whichever chart currently has a brush, or null.
+    for (const c of [this.chart1, this.chart2]) {
+      if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
+    }
+    return null;
+  }
+  clearBrush() {
+    clearChartBrush(this.chart1);
+    clearChartBrush(this.chart2);
+  }
+  applyNaNLocally() {
+    const ab = this.activeBrush();
+    if (!ab) return 0;
+    return applyNaNToChartLocally(ab.chart);
   }
 
   _syncZoom() {
@@ -244,6 +445,7 @@ class CVRCharts {
     this.chart2 = null;
     this.chart3 = null;
     this.marksVisible = new Set();
+    this.onBrushChange = () => {};
   }
 
   init(data) {
@@ -273,8 +475,43 @@ class CVRCharts {
       options: makeChartOptions('ETCO2', { ...ann }),
     });
 
+    const onBrush = (active) => (s) => {
+      if (s.hasBrush) {
+        for (const c of [this.chart1, this.chart2, this.chart3]) {
+          if (c && c !== active && c.$brush && c.$brush.rect) clearChartBrush(c);
+        }
+      }
+      this.onBrushChange(s);
+    };
+    attachBrush(this.chart1, 'mean_u', onBrush(this.chart1));
+    attachBrush(this.chart2, 'env_u',  onBrush(this.chart2));
+    attachBrush(this.chart3, 'etco2',  onBrush(this.chart3));
+
     this._syncZoom();
     this.data = data;
+  }
+
+  // ── brush API used by app.js ──
+  setBrushMode(on) {
+    setChartBrushMode(this.chart1, on);
+    setChartBrushMode(this.chart2, on);
+    setChartBrushMode(this.chart3, on);
+  }
+  activeBrush() {
+    for (const c of [this.chart1, this.chart2, this.chart3]) {
+      if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
+    }
+    return null;
+  }
+  clearBrush() {
+    clearChartBrush(this.chart1);
+    clearChartBrush(this.chart2);
+    clearChartBrush(this.chart3);
+  }
+  applyNaNLocally() {
+    const ab = this.activeBrush();
+    if (!ab) return 0;
+    return applyNaNToChartLocally(ab.chart);
   }
 
   _syncZoom() {

@@ -394,6 +394,83 @@ def api_cvr_calculate():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  EDIT – REPLACE BRUSHED POINTS WITH NaN
+# ═══════════════════════════════════════════════════════════════════════
+
+# Whitelist of signals the user may edit. Maps the request name to the
+# attribute name on SessionState.
+EDITABLE_SIGNALS = {
+    "mean_u": "mean_u",
+    "env_u":  "env_u",
+    "etco2":  "etco2",
+    "abp":    "abp",
+}
+
+
+@app.route("/api/edit/nan", methods=["POST"])
+def api_edit_nan():
+    """
+    Replace samples inside one or more brushed rectangles with NaN.
+
+    Body:
+      {
+        "signal": "env_u" | "mean_u" | "etco2" | "abp",
+        "ranges": [{ "x_min": float, "x_max": float,
+                     "y_min": float, "y_max": float }, ...]
+      }
+
+    For each rectangle, *all* full-resolution samples whose (time, value)
+    falls inside it become NaN. This preserves the time axis (no row is
+    removed) and propagates to plots, CA/CVR calculations, and exports.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+
+    body = request.get_json() or {}
+    signal = body.get("signal")
+    ranges = body.get("ranges") or []
+
+    if signal not in EDITABLE_SIGNALS:
+        return jsonify({"error": f"Unknown signal '{signal}'"}), 400
+    if not isinstance(ranges, list) or not ranges:
+        return jsonify({"error": "No ranges provided"}), 400
+
+    arr = getattr(state, EDITABLE_SIGNALS[signal])
+    if arr is None or len(arr) == 0:
+        return jsonify({"error": f"Signal '{signal}' is empty"}), 400
+
+    total_changed = 0
+    for r in ranges:
+        try:
+            x_min = float(r["x_min"]); x_max = float(r["x_max"])
+            y_min = float(r["y_min"]); y_max = float(r["y_max"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Each range needs numeric x_min, x_max, y_min, y_max"}), 400
+        if x_max < x_min: x_min, x_max = x_max, x_min
+        if y_max < y_min: y_min, y_max = y_max, y_min
+
+        mask = (
+            (state.time >= x_min) & (state.time <= x_max) &
+            (arr     >= y_min) & (arr     <= y_max) &
+            ~np.isnan(arr)
+        )
+        n = int(mask.sum())
+        if n > 0:
+            arr[mask] = np.nan
+            total_changed += n
+
+    state.log(
+        f"Edit: replaced {total_changed} sample(s) in {signal} with NaN "
+        f"(across {len(ranges)} brush region(s))."
+    )
+    return jsonify({
+        "signal": signal,
+        "changed": total_changed,
+        "total_nan": int(np.isnan(arr).sum()),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  METADATA UPDATE
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -49,14 +49,16 @@ async function api(url, opts = {}) {
 }
 
 function enableCA(yes) {
-  ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caZoomMenu', 'caZoomBtn'].forEach(id => {
+  ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caZoomMenu', 'caZoomBtn',
+   'caBrushBtn'].forEach(id => {
     $(id).disabled = !yes;
   });
 }
 
 function enableCVR(yes) {
   ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrClearBtn', 'cvrCalcBtn',
-   'cvrPeakBtn', 'cvrZoomMenu', 'cvrZoomBtn'].forEach(id => {
+   'cvrPeakBtn', 'cvrZoomMenu', 'cvrZoomBtn',
+   'cvrBrushBtn'].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -394,6 +396,90 @@ $('cvrZoomBtn').addEventListener('click', () => {
     cvrCharts.zoomToRange(r.min, 300);
   }
 });
+
+
+/* ═══════════════════════ BRUSH (NaN edit) ═══════════════════════
+   Drag-select a rectangle on any plot → those samples in the underlying
+   signal become NaN, preserving the time axis. */
+
+const brushState = {
+  ca:  { mode: false, hasBrush: false },
+  cvr: { mode: false, hasBrush: false },
+};
+
+function updateBrushButtons(tab) {
+  const s = brushState[tab];
+  const prefix = tab;   // 'ca' or 'cvr'
+  $(prefix + 'BrushBtn').textContent = 'Brush: ' + (s.mode ? 'ON' : 'OFF');
+  $(prefix + 'BrushBtn').classList.toggle('btn-primary', s.mode);
+  $(prefix + 'NanBtn').disabled = !s.hasBrush;
+  $(prefix + 'BrushClearBtn').disabled = !s.hasBrush;
+}
+
+// Hook each chart-controller's brush-change callback to update the UI.
+caCharts.onBrushChange  = (info) => {
+  brushState.ca.hasBrush = !!info.hasBrush;
+  updateBrushButtons('ca');
+};
+cvrCharts.onBrushChange = (info) => {
+  brushState.cvr.hasBrush = !!info.hasBrush;
+  updateBrushButtons('cvr');
+};
+
+function toggleBrushMode(tab) {
+  const s = brushState[tab];
+  s.mode = !s.mode;
+  if (tab === 'ca')  caCharts.setBrushMode(s.mode);
+  else               cvrCharts.setBrushMode(s.mode);
+  // Cancel any pending click-to-select mode if brushing is being turned on.
+  if (s.mode) {
+    clickMode = null;
+    ['caPlot1', 'caPlot2', 'cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(id => {
+      const el = $(id);
+      if (el && el.parentElement) el.parentElement.classList.remove('clickable');
+    });
+  } else {
+    // Leaving brush mode also clears any pending brush rectangle.
+    if (tab === 'ca')  caCharts.clearBrush();
+    else               cvrCharts.clearBrush();
+    s.hasBrush = false;
+  }
+  updateBrushButtons(tab);
+  appendLog(`${tab.toUpperCase()}: Brush mode ${s.mode ? 'ON' : 'OFF'}.`);
+}
+
+$('caBrushBtn').addEventListener('click',  () => toggleBrushMode('ca'));
+$('cvrBrushBtn').addEventListener('click', () => toggleBrushMode('cvr'));
+
+$('caBrushClearBtn').addEventListener('click',  () => { caCharts.clearBrush(); });
+$('cvrBrushClearBtn').addEventListener('click', () => { cvrCharts.clearBrush(); });
+
+async function applyNaN(tab) {
+  const charts = (tab === 'ca') ? caCharts : cvrCharts;
+  const ab = charts.activeBrush();
+  if (!ab) { toast('Nothing brushed yet', 'info'); return; }
+  showLoading();
+  try {
+    const res = await api('/api/edit/nan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signal: ab.signal, ranges: [ab.rect] }),
+    });
+    // Update chart locally so the user sees the gap immediately.
+    charts.applyNaNLocally();
+    brushState[tab].hasBrush = false;
+    updateBrushButtons(tab);
+    appendLog(`${tab.toUpperCase()}: Replaced ${res.changed} sample(s) in ${ab.signal} with NaN.`);
+    toast(`Replaced ${res.changed} sample(s) with NaN`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog(`${tab.toUpperCase()} NaN-replace error: ${err.message}`);
+  }
+  hideLoading();
+}
+
+$('caNanBtn').addEventListener('click',  () => applyNaN('ca'));
+$('cvrNanBtn').addEventListener('click', () => applyNaN('cvr'));
 
 
 /* ═══════════════════════ SAVE ═══════════════════════ */
