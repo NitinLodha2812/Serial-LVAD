@@ -16,6 +16,47 @@ BASELINE_SAMPLES = 4000                     # ~32 s
 HYPERCAP_SAMPLES = 1250                     # ~10 s
 
 
+# ── Column-name aliases ────────────────────────────────────────────────
+# Each signal lists normalized substring patterns to look for in the header.
+# Headers are normalized to alphanumeric-lowercase (e.g. "1-1 Env U" → "11envu",
+# "ETCO2(mmHg)" → "etco2mmhg") before matching. Patterns are tried in order, so
+# the *first* (most specific) match wins — e.g. "fiabp" is preferred over a bare
+# "abp" fallback that might otherwise match "reABP".
+COLUMN_ALIASES = {
+    "mean_u": ["meanu"],            # matches "1-1 Mean U", "Mean U", "meanU"
+    "env_u":  ["envu"],             # matches "1-1 Env U", "Env U", "envU"
+    "etco2":  ["etco2"],            # matches "ETCO2(mmHg)", "ETCO2" (not "CO2")
+    "abp":    ["fiabp", "abp"],     # prefer fiABP; fall back to any *abp* col
+    "mark":   ["mark"],             # marks/event column
+}
+
+# Fallback positions used only if a column cannot be located by name.
+COLUMN_FALLBACK_POS = {
+    "mean_u": 1,
+    "env_u":  4,
+    "etco2":  6,
+    "abp":    8,
+}
+
+
+def _normalize_header(s) -> str:
+    """Lowercase and strip non-alphanumeric characters from a header string."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def find_column(headers, signal: str):
+    """
+    Return the index of the column matching `signal`, or None if not found.
+    Tries each alias substring in order against normalized headers.
+    """
+    norm_headers = [_normalize_header(h) for h in headers]
+    for pattern in COLUMN_ALIASES.get(signal, []):
+        for i, nh in enumerate(norm_headers):
+            if pattern in nh:
+                return i
+    return None
+
+
 class SessionState:
     """Holds all state for a single loaded file."""
 
@@ -28,6 +69,9 @@ class SessionState:
         # raw table (list of dicts kept for master-sheet export)
         self.raw_headers: list = []
         self.raw_rows: list = []          # list[list] – preserves original file
+
+        # column-name → index map resolved at load time
+        self.column_positions: dict = {}  # e.g. {"mean_u": 1, "env_u": 4, ...}
 
         # parsed column vectors (numpy float64)
         self.time: np.ndarray = np.array([])
@@ -98,19 +142,47 @@ class SessionState:
         self.time = time_vec
 
         def safe_col(idx):
-            if idx < len(df.columns):
-                return pd.to_numeric(df.iloc[:, idx], errors='coerce').to_numpy(dtype=np.float64)
-            return np.full(n, np.nan)
+            if idx is None or idx >= len(df.columns):
+                return np.full(n, np.nan)
+            return pd.to_numeric(df.iloc[:, idx], errors='coerce').to_numpy(dtype=np.float64)
 
-        # Column mapping (0-indexed):
-        # 0: time, 1: 1-1 Mean U, 4: 1-1 Env U, 6: ETCO2, 8: fiABP
-        self.mean_u = safe_col(1)
-        self.env_u  = safe_col(4)
-        self.etco2  = safe_col(6)
-        self.abp    = safe_col(8)
+        # Resolve each signal by *column name* (with positional fallback).
+        # The variable order in the export can change between recordings, so
+        # we never assume a fixed column index — see find_column().
+        resolved = {}
+        for signal in ("mean_u", "env_u", "etco2", "abp"):
+            idx = find_column(self.raw_headers, signal)
+            if idx is None:
+                fb = COLUMN_FALLBACK_POS.get(signal)
+                if fb is not None and fb < len(self.raw_headers):
+                    self.log(
+                        f"WARNING: '{signal}' column not found by name — "
+                        f"falling back to position {fb} ({self.raw_headers[fb]!r})."
+                    )
+                    idx = fb
+                else:
+                    self.log(f"WARNING: '{signal}' column not found — using NaN.")
+            else:
+                self.log(f"Matched '{signal}' → column {idx} ({self.raw_headers[idx]!r}).")
+            resolved[signal] = idx
 
-        # parse marks – last column
-        mark_col_idx = len(self.raw_headers) - 1
+        self.column_positions = resolved
+        self.mean_u = safe_col(resolved["mean_u"])
+        self.env_u  = safe_col(resolved["env_u"])
+        self.etco2  = safe_col(resolved["etco2"])
+        self.abp    = safe_col(resolved["abp"])
+
+        # parse marks – locate by name ("mark"), else fall back to last column
+        mark_col_idx = find_column(self.raw_headers, "mark")
+        if mark_col_idx is None:
+            mark_col_idx = len(self.raw_headers) - 1
+            self.log(
+                f"Marks column not found by name — using last column "
+                f"({self.raw_headers[mark_col_idx]!r})."
+            )
+        else:
+            self.log(f"Matched 'mark' → column {mark_col_idx} ({self.raw_headers[mark_col_idx]!r}).")
+
         self.marks_labels = []
         self.marks_times = []
         mark_col = df.iloc[:, mark_col_idx].astype(str)

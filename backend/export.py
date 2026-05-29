@@ -65,17 +65,21 @@ def save_excel(state: SessionState, out_dir: str) -> str:
         # ── Master sheet ──
         if state.raw_headers and state.raw_rows:
             master_df = pd.DataFrame(state.raw_rows, columns=state.raw_headers)
-            # Reflect NaN edits in the modified columns
-            col_map = {
-                1: state.mean_u,
-                4: state.env_u,
-                6: state.etco2,
-                8: state.abp,
+            # Reflect edits in the modified columns. Use the name-resolved
+            # positions captured at load time so this works regardless of the
+            # source file's column order.
+            col_positions = getattr(state, "column_positions", {}) or {}
+            sig_to_arr = {
+                "mean_u": state.mean_u,
+                "env_u":  state.env_u,
+                "etco2":  state.etco2,
+                "abp":    state.abp,
             }
-            for col_idx, arr in col_map.items():
-                if col_idx < len(state.raw_headers) and arr is not None and len(arr) == len(master_df):
-                    col_name = state.raw_headers[col_idx]
-                    master_df[col_name] = arr
+            for signal, arr in sig_to_arr.items():
+                col_idx = col_positions.get(signal)
+                if (col_idx is not None and col_idx < len(state.raw_headers)
+                        and arr is not None and len(arr) == len(master_df)):
+                    master_df[state.raw_headers[col_idx]] = arr
             master_df.to_excel(writer, sheet_name="Master", index=False)
 
         # ── CA sheets ──
