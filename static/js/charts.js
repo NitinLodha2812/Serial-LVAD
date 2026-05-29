@@ -356,30 +356,36 @@ class CACharts {
   }
 
   addSelection(selData) {
+    // The selection mask is a *visual indicator only* — the MX calculation
+    // runs on the underlying full-resolution samples stored server-side.
+    // We render the mask as a shaded annotation box (not a duplicated line
+    // trace), so the original signal trace is the only line on the plot and
+    // there is no decimation mismatch between base and overlay.
     if (!this.chart1 || !this.chart2) return;
-    this._removeDataset(this.chart1, 'selection');
-    this._removeDataset(this.chart2, 'selection');
-
-    const envPts = xyData(selData.time, selData.env);
-    const abpPts = xyData(selData.time, selData.abp);
-
-    this.chart1.data.datasets.push({
-      data: envPts, borderColor: COLORS.selCA, backgroundColor: COLORS.selCA + '22',
-      pointRadius: 0, showLine: true, borderWidth: 2.5, fill: true, label: 'selection',
+    [this.chart1, this.chart2].forEach(chart => {
+      this._removeDataset(chart, 'selection');   // strip any old line-style overlay
+      const ann = chart.options.plugins.annotation.annotations;
+      ann.ca_selection = {
+        type: 'box',
+        xMin: selData.start_time,
+        xMax: selData.end_time,
+        backgroundColor: COLORS.selCA + '22',
+        borderColor: COLORS.selCA,
+        borderWidth: 1,
+        drawTime: 'beforeDatasetsDraw',          // shade behind the trace
+      };
+      chart.update('none');
     });
-    this.chart2.data.datasets.push({
-      data: abpPts, borderColor: COLORS.selCA, backgroundColor: COLORS.selCA + '22',
-      pointRadius: 0, showLine: true, borderWidth: 2.5, fill: true, label: 'selection',
-    });
-    this.chart1.update('none');
-    this.chart2.update('none');
   }
 
   clearSelection() {
-    this._removeDataset(this.chart1, 'selection');
-    this._removeDataset(this.chart2, 'selection');
-    if (this.chart1) this.chart1.update('none');
-    if (this.chart2) this.chart2.update('none');
+    [this.chart1, this.chart2].forEach(chart => {
+      if (!chart) return;
+      this._removeDataset(chart, 'selection');
+      const ann = chart.options.plugins.annotation.annotations;
+      delete ann.ca_selection;
+      chart.update('none');
+    });
   }
 
   updateMarks(visibleSet) {
@@ -536,36 +542,29 @@ class CVRCharts {
     charts.forEach(c => c.update('none'));
   }
 
-  addBaseline(sel) {
-    this._removeOverlay('baseline');
-    const pairs = [
-      [this.chart1, sel.time, sel.mean],
-      [this.chart2, sel.time, sel.env],
-      [this.chart3, sel.time, sel.co2],
-    ];
-    pairs.forEach(([chart, t, v]) => {
-      if (!chart) return;
-      chart.data.datasets.push({
-        data: xyData(t, v), borderColor: COLORS.selBase, backgroundColor: COLORS.selBase + '22',
-        pointRadius: 0, showLine: true, borderWidth: 2.5, fill: true, label: 'baseline',
-      });
-      chart.update('none');
-    });
-  }
+  // Render baseline / hypercapnia masks as translucent annotation boxes so
+  // they shade only the time interval and don't introduce a second decimated
+  // trace on top of the underlying signal. The CVR calculation reads the
+  // full-resolution server-side selection, not these visual overlays.
+  addBaseline(sel)    { this._addRegion('cvr_baseline',    sel, COLORS.selBase); }
+  addHypercapnia(sel) { this._addRegion('cvr_hypercapnia', sel, COLORS.selHyp); }
 
-  addHypercapnia(sel) {
-    this._removeOverlay('hypercapnia');
-    const pairs = [
-      [this.chart1, sel.time, sel.mean],
-      [this.chart2, sel.time, sel.env],
-      [this.chart3, sel.time, sel.co2],
-    ];
-    pairs.forEach(([chart, t, v]) => {
+  _addRegion(annKey, sel, color) {
+    [this.chart1, this.chart2, this.chart3].forEach(chart => {
       if (!chart) return;
-      chart.data.datasets.push({
-        data: xyData(t, v), borderColor: COLORS.selHyp, backgroundColor: COLORS.selHyp + '22',
-        pointRadius: 0, showLine: true, borderWidth: 2.5, fill: true, label: 'hypercapnia',
-      });
+      // Strip any legacy line-style overlay
+      const oldLabel = annKey === 'cvr_baseline' ? 'baseline' : 'hypercapnia';
+      chart.data.datasets = chart.data.datasets.filter(d => d.label !== oldLabel);
+      const ann = chart.options.plugins.annotation.annotations;
+      ann[annKey] = {
+        type: 'box',
+        xMin: sel.start_time,
+        xMax: sel.end_time,
+        backgroundColor: color + '22',
+        borderColor: color,
+        borderWidth: 1,
+        drawTime: 'beforeDatasetsDraw',
+      };
       chart.update('none');
     });
   }
@@ -585,6 +584,13 @@ class CVRCharts {
     this._removeOverlay('baseline');
     this._removeOverlay('hypercapnia');
     this._removeOverlay('peak');
+    [this.chart1, this.chart2, this.chart3].forEach(c => {
+      if (!c) return;
+      const ann = c.options.plugins.annotation.annotations;
+      delete ann.cvr_baseline;
+      delete ann.cvr_hypercapnia;
+      c.update('none');
+    });
   }
 
   _removeOverlay(name) {

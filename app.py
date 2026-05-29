@@ -105,15 +105,13 @@ def api_ca_select():
         state.log("CA: Not enough samples; using available samples")
 
     inds = slice(idx_start, idx_end + 1)
-    raw_time = state.time[inds]
-    raw_env = state.env_u[inds]
-    raw_abp = state.abp[inds]
-
-    # keep only valid (non-NaN) samples
-    valid = ~np.isnan(raw_env) & ~np.isnan(raw_abp)
-    sel_time = raw_time[valid]
-    sel_env = raw_env[valid]
-    sel_abp = raw_abp[valid]
+    # Preserve NaN samples in the selection — compute_mx slices the array
+    # into non-overlapping 375-sample (3-second) windows, so dropping NaN
+    # rows here would silently misalign the windowing in wall-clock time.
+    # NaN handling lives inside compute_mx (>=50% valid threshold + nanmean).
+    sel_time = state.time[inds].copy()
+    sel_env  = state.env_u[inds].copy()
+    sel_abp  = state.abp[inds].copy()
 
     state.ca_selection = {
         "time": sel_time,
@@ -121,16 +119,21 @@ def api_ca_select():
         "abp": sel_abp,
     }
 
-    state.log(f"CA: 5-min selection stored, starting at t={state.time[idx_start]:.2f}")
+    n_nan_env = int(np.isnan(sel_env).sum())
+    n_nan_abp = int(np.isnan(sel_abp).sum())
+    state.log(
+        f"CA: 5-min selection stored, starting at t={state.time[idx_start]:.2f} "
+        f"({len(sel_time)} samples; NaN env={n_nan_env}, NaN abp={n_nan_abp})"
+    )
 
-    # Decimate for frontend display (full-res kept in state for calculations)
-    decimate = max(1, len(sel_time) // 2000)
+    # Frontend only needs the time range for the shaded mask annotation —
+    # the full-resolution arrays remain in state for the calculation.
     return jsonify({
-        "time": state._to_list(sel_time, decimate),
-        "env": state._to_list(sel_env, decimate),
-        "abp": state._to_list(sel_abp, decimate),
         "start_time": float(state.time[idx_start]),
         "end_time": float(state.time[idx_end]),
+        "n_samples": int(len(sel_time)),
+        "n_nan_env": n_nan_env,
+        "n_nan_abp": n_nan_abp,
     })
 
 
@@ -222,34 +225,28 @@ def api_cvr_select_baseline():
     idx_end = min(idx + BASELINE_SAMPLES - 1, len(state.time) - 1)
     inds = slice(idx, idx_end + 1)
 
-    raw_time = state.time[inds]
-    raw_mean = state.mean_u[inds]
-    raw_env = state.env_u[inds]
-    raw_co2 = state.etco2[inds]
+    # Preserve NaN; nanmean inside compute_cvr handles it correctly.
+    sel_time = state.time[inds].copy()
+    sel_mean = state.mean_u[inds].copy()
+    sel_env  = state.env_u[inds].copy()
+    sel_co2  = state.etco2[inds].copy()
 
-    valid = ~np.isnan(raw_mean) & ~np.isnan(raw_env) & ~np.isnan(raw_co2)
-    sel_time = raw_time[valid]
-    sel_mean = raw_mean[valid]
-    sel_env = raw_env[valid]
-    sel_co2 = raw_co2[valid]
-
-    if len(sel_time) == 0:
+    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env) & np.isnan(sel_co2)):
         return jsonify({"error": "Baseline selection contains no valid data."}), 400
 
     state.cvr_baseline = {
         "time": sel_time, "mean": sel_mean,
         "env": sel_env, "co2": sel_co2,
     }
-    state.log(f"CVR: baseline start t={state.time[idx]:.2f}")
+    state.log(
+        f"CVR: baseline start t={state.time[idx]:.2f} "
+        f"({len(sel_time)} samples)"
+    )
 
-    decimate = max(1, len(sel_time) // 2000)
     return jsonify({
-        "time": state._to_list(sel_time, decimate),
-        "mean": state._to_list(sel_mean, decimate),
-        "env": state._to_list(sel_env, decimate),
-        "co2": state._to_list(sel_co2, decimate),
         "start_time": float(state.time[idx]),
         "end_time": float(state.time[idx_end]),
+        "n_samples": int(len(sel_time)),
     })
 
 
@@ -268,34 +265,27 @@ def api_cvr_select_hypercapnia():
     idx_end = min(idx + HYPERCAP_SAMPLES - 1, len(state.time) - 1)
     inds = slice(idx, idx_end + 1)
 
-    raw_time = state.time[inds]
-    raw_mean = state.mean_u[inds]
-    raw_env = state.env_u[inds]
-    raw_co2 = state.etco2[inds]
+    sel_time = state.time[inds].copy()
+    sel_mean = state.mean_u[inds].copy()
+    sel_env  = state.env_u[inds].copy()
+    sel_co2  = state.etco2[inds].copy()
 
-    valid = ~np.isnan(raw_mean) & ~np.isnan(raw_env) & ~np.isnan(raw_co2)
-    sel_time = raw_time[valid]
-    sel_mean = raw_mean[valid]
-    sel_env = raw_env[valid]
-    sel_co2 = raw_co2[valid]
-
-    if len(sel_time) == 0:
+    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env) & np.isnan(sel_co2)):
         return jsonify({"error": "Hypercapnia selection contains no valid data."}), 400
 
     state.cvr_hypercap = {
         "time": sel_time, "mean": sel_mean,
         "env": sel_env, "co2": sel_co2,
     }
-    state.log(f"CVR: hypercapnia start t={state.time[idx]:.2f}")
+    state.log(
+        f"CVR: hypercapnia start t={state.time[idx]:.2f} "
+        f"({len(sel_time)} samples)"
+    )
 
-    decimate = max(1, len(sel_time) // 2000)
     return jsonify({
-        "time": state._to_list(sel_time, decimate),
-        "mean": state._to_list(sel_mean, decimate),
-        "env": state._to_list(sel_env, decimate),
-        "co2": state._to_list(sel_co2, decimate),
         "start_time": float(state.time[idx]),
         "end_time": float(state.time[idx_end]),
+        "n_samples": int(len(sel_time)),
     })
 
 
