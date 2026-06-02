@@ -293,27 +293,99 @@ def api_cvr_select_hypercapnia():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  CVR – SELECT CO2 SEARCH WINDOW (gas-on → gas-off)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.route("/api/cvr/select_co2_window", methods=["POST"])
+def api_cvr_select_co2_window():
+    """
+    Define an explicit time range for peak-ETCO2 detection. This is broader
+    than the (~10 s) hypercapnia selection and typically spans gas-on to
+    gas-off, so the search captures the true ETCO2 peak even when the
+    brain-response window lags the inhaled-CO2 rise.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+
+    body = request.get_json() or {}
+    try:
+        start = float(body["start_time"])
+        end   = float(body["end_time"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "start_time and end_time (numbers) are required."}), 400
+    if end < start:
+        start, end = end, start
+    if end <= start:
+        return jsonify({"error": "CO2 window must have non-zero width."}), 400
+
+    # Snap to actual sample indices on the time axis
+    i0 = int(np.searchsorted(state.time, start))
+    i1 = int(np.searchsorted(state.time, end))
+    i0 = max(0, min(i0, len(state.time) - 1))
+    i1 = max(0, min(i1, len(state.time) - 1))
+    if i1 <= i0:
+        return jsonify({"error": "CO2 window snapped to zero samples."}), 400
+
+    t0 = float(state.time[i0])
+    t1 = float(state.time[i1])
+    state.cvr_co2_window = {
+        "start": t0, "end": t1,
+        "i_start": i0, "i_end": i1,
+    }
+    state.log(
+        f"CVR: CO2 search window set t={t0:.2f}..{t1:.2f} "
+        f"({i1 - i0 + 1} samples)"
+    )
+    return jsonify({"start_time": t0, "end_time": t1, "n_samples": i1 - i0 + 1})
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  CVR – DETECT PEAK ETCO2
 # ═══════════════════════════════════════════════════════════════════════
 
 @app.route("/api/cvr/detect_peak", methods=["POST"])
 def api_cvr_detect_peak():
+    """
+    Find the highest ETCO2 sample. Search range, in priority order:
+      1. The user-selected CO2 window (set via /api/cvr/select_co2_window) —
+         this is the gas-on → gas-off range and is the physiologically
+         correct place to look for the peak.
+      2. Falls back to the hypercapnia selection if no CO2 window is set,
+         preserving the old behaviour.
+    """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
-    if state.cvr_hypercap is None:
-        return jsonify({"error": "Hypercapnia selection required before detecting peak etCO2."}), 400
 
-    co2 = state.cvr_hypercap["co2"]
-    t = state.cvr_hypercap["time"]
+    source = None
+    if state.cvr_co2_window is not None:
+        i0 = state.cvr_co2_window["i_start"]
+        i1 = state.cvr_co2_window["i_end"] + 1
+        co2 = state.etco2[i0:i1]
+        t   = state.time[i0:i1]
+        source = "CO2 window"
+    elif state.cvr_hypercap is not None:
+        co2 = state.cvr_hypercap["co2"]
+        t   = state.cvr_hypercap["time"]
+        source = "hypercapnia window (fallback — set a CO2 window for the full gas-on→off range)"
+    else:
+        return jsonify({"error": "Set a CO2 window (or a hypercapnia selection) before detecting peak etCO2."}), 400
+
+    if np.all(np.isnan(co2)):
+        return jsonify({"error": "ETCO2 has no valid samples in the selected range."}), 400
+
     idx = int(np.nanargmax(co2))
     val = float(co2[idx])
     peak_time = float(t[idx])
 
     state.cvr_peak_etco2 = val
-    state.cvr_peak_time = peak_time
-    state.log(f"CVR: peak etCO2 detected = {val:.2f} at t={peak_time:.2f}")
+    state.cvr_peak_time  = peak_time
+    state.log(f"CVR: peak etCO2 = {val:.2f} at t={peak_time:.2f} (source: {source})")
 
-    return jsonify({"peak_value": round(val, 4), "peak_time": round(peak_time, 4)})
+    return jsonify({
+        "peak_value": round(val, 4),
+        "peak_time":  round(peak_time, 4),
+        "source": source,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -326,6 +398,7 @@ def api_cvr_clear():
         return jsonify({"error": "No data loaded"}), 400
     state.cvr_baseline = None
     state.cvr_hypercap = None
+    state.cvr_co2_window = None
     state.cvr_peak_etco2 = None
     state.cvr_peak_time = None
     state.cvr_result = None
@@ -396,6 +469,7 @@ EDITABLE_SIGNALS = {
     "mean_u": "mean_u",
     "env_u":  "env_u",
     "etco2":  "etco2",
+    "co2":    "co2",
     "abp":    "abp",
 }
 

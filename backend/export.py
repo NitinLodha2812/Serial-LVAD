@@ -73,6 +73,7 @@ def save_excel(state: SessionState, out_dir: str) -> str:
                 "mean_u": state.mean_u,
                 "env_u":  state.env_u,
                 "etco2":  state.etco2,
+                "co2":    state.co2,
                 "abp":    state.abp,
             }
             for signal, arr in sig_to_arr.items():

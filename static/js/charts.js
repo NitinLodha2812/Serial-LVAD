@@ -9,9 +9,11 @@ const COLORS = {
   abp:      '#2C2A26',
   meanU:    '#2980B9',
   etco2:    '#7A7568',
+  co2wave:  '#D35400',
   selCA:    '#2980B9',
   selBase:  '#27AE60',
   selHyp:   '#8E44AD',
+  selCo2W:  '#F39C12',   // CO2 search window
   peak:     '#C0392B',
   mark:     'rgba(192, 57, 43, .55)',
 };
@@ -450,15 +452,21 @@ class CVRCharts {
     this.chart1 = null;
     this.chart2 = null;
     this.chart3 = null;
+    this.chart4 = null;
     this.marksVisible = new Set();
     this.onBrushChange = () => {};
+  }
+
+  _allCharts() {
+    return [this.chart1, this.chart2, this.chart3, this.chart4].filter(Boolean);
   }
 
   init(data) {
     this.destroy();
     const meanPts = xyData(data.time, data.mean_u);
     const envPts  = xyData(data.time, data.env_u);
-    const co2Pts  = xyData(data.time, data.etco2);
+    const etPts   = xyData(data.time, data.etco2);
+    const co2Pts  = xyData(data.time, data.co2 || []);
 
     this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
     const ann = markAnnotations(data.marks_labels, data.marks_times, this.marksVisible);
@@ -477,14 +485,20 @@ class CVRCharts {
 
     this.chart3 = new Chart(document.getElementById('cvrPlot3'), {
       type: 'line',
-      data: { datasets: [{ data: co2Pts, borderColor: COLORS.etco2, label: 'main' }] },
+      data: { datasets: [{ data: etPts, borderColor: COLORS.etco2, label: 'main' }] },
       options: makeChartOptions('ETCO2', { ...ann }),
+    });
+
+    this.chart4 = new Chart(document.getElementById('cvrPlot4'), {
+      type: 'line',
+      data: { datasets: [{ data: co2Pts, borderColor: COLORS.co2wave, label: 'main' }] },
+      options: makeChartOptions('CO2', { ...ann }),
     });
 
     const onBrush = (active) => (s) => {
       if (s.hasBrush) {
-        for (const c of [this.chart1, this.chart2, this.chart3]) {
-          if (c && c !== active && c.$brush && c.$brush.rect) clearChartBrush(c);
+        for (const c of this._allCharts()) {
+          if (c !== active && c.$brush && c.$brush.rect) clearChartBrush(c);
         }
       }
       this.onBrushChange(s);
@@ -492,6 +506,7 @@ class CVRCharts {
     attachBrush(this.chart1, 'mean_u', onBrush(this.chart1));
     attachBrush(this.chart2, 'env_u',  onBrush(this.chart2));
     attachBrush(this.chart3, 'etco2',  onBrush(this.chart3));
+    attachBrush(this.chart4, 'co2',    onBrush(this.chart4));
 
     this._syncZoom();
     this.data = data;
@@ -499,20 +514,16 @@ class CVRCharts {
 
   // ── brush API used by app.js ──
   setBrushMode(on) {
-    setChartBrushMode(this.chart1, on);
-    setChartBrushMode(this.chart2, on);
-    setChartBrushMode(this.chart3, on);
+    for (const c of this._allCharts()) setChartBrushMode(c, on);
   }
   activeBrush() {
-    for (const c of [this.chart1, this.chart2, this.chart3]) {
-      if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
+    for (const c of this._allCharts()) {
+      if (c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
     }
     return null;
   }
   clearBrush() {
-    clearChartBrush(this.chart1);
-    clearChartBrush(this.chart2);
-    clearChartBrush(this.chart3);
+    for (const c of this._allCharts()) clearChartBrush(c);
   }
   applyNaNLocally() {
     const ab = this.activeBrush();
@@ -521,7 +532,7 @@ class CVRCharts {
   }
 
   _syncZoom() {
-    const charts = [this.chart1, this.chart2, this.chart3].filter(Boolean);
+    const charts = this._allCharts();
     charts.forEach(source => {
       const others = charts.filter(c => c !== source);
       source.options.plugins.zoom.zoom.onZoomComplete = () => {
@@ -550,8 +561,7 @@ class CVRCharts {
   addHypercapnia(sel) { this._addRegion('cvr_hypercapnia', sel, COLORS.selHyp); }
 
   _addRegion(annKey, sel, color) {
-    [this.chart1, this.chart2, this.chart3].forEach(chart => {
-      if (!chart) return;
+    this._allCharts().forEach(chart => {
       // Strip any legacy line-style overlay
       const oldLabel = annKey === 'cvr_baseline' ? 'baseline' : 'hypercapnia';
       chart.data.datasets = chart.data.datasets.filter(d => d.label !== oldLabel);
@@ -565,6 +575,32 @@ class CVRCharts {
         borderWidth: 1,
         drawTime: 'beforeDatasetsDraw',
       };
+      chart.update('none');
+    });
+  }
+
+  // CO2 search window (gas-on → gas-off) — shaded across all 4 plots so the
+  // operator can see at a glance what range peak-detect will use.
+  addCo2Window(sel) {
+    this._allCharts().forEach(chart => {
+      const ann = chart.options.plugins.annotation.annotations;
+      ann.cvr_co2_window = {
+        type: 'box',
+        xMin: sel.start_time,
+        xMax: sel.end_time,
+        backgroundColor: COLORS.selCo2W + '22',
+        borderColor: COLORS.selCo2W,
+        borderWidth: 1,
+        borderDash: [5, 3],
+        drawTime: 'beforeDatasetsDraw',
+      };
+      chart.update('none');
+    });
+  }
+  clearCo2Window() {
+    this._allCharts().forEach(chart => {
+      const ann = chart.options.plugins.annotation.annotations;
+      delete ann.cvr_co2_window;
       chart.update('none');
     });
   }
@@ -584,18 +620,17 @@ class CVRCharts {
     this._removeOverlay('baseline');
     this._removeOverlay('hypercapnia');
     this._removeOverlay('peak');
-    [this.chart1, this.chart2, this.chart3].forEach(c => {
-      if (!c) return;
+    this._allCharts().forEach(c => {
       const ann = c.options.plugins.annotation.annotations;
       delete ann.cvr_baseline;
       delete ann.cvr_hypercapnia;
+      delete ann.cvr_co2_window;
       c.update('none');
     });
   }
 
   _removeOverlay(name) {
-    [this.chart1, this.chart2, this.chart3].forEach(c => {
-      if (!c) return;
+    this._allCharts().forEach(c => {
       c.data.datasets = c.data.datasets.filter(d => d.label !== name);
       c.update('none');
     });
@@ -603,8 +638,7 @@ class CVRCharts {
 
   updateMarks(visibleSet) {
     this.marksVisible = visibleSet;
-    [this.chart1, this.chart2, this.chart3].forEach(chart => {
-      if (!chart) return;
+    this._allCharts().forEach(chart => {
       const ann = chart.options.plugins.annotation.annotations;
       for (const key in ann) {
         if (key.startsWith('mark_')) {
@@ -618,12 +652,11 @@ class CVRCharts {
   }
 
   resetZoom() {
-    [this.chart1, this.chart2, this.chart3].forEach(c => { if (c) c.resetZoom(); });
+    this._allCharts().forEach(c => c.resetZoom());
   }
 
   zoomToRange(start, duration) {
-    [this.chart1, this.chart2, this.chart3].forEach(c => {
-      if (!c) return;
+    this._allCharts().forEach(c => {
       c.options.scales.x.min = start;
       c.options.scales.x.max = start + duration;
       c.update('none');
@@ -642,8 +675,8 @@ class CVRCharts {
   }
 
   destroy() {
-    [this.chart1, this.chart2, this.chart3].forEach(c => { if (c) c.destroy(); });
-    this.chart1 = this.chart2 = this.chart3 = null;
+    this._allCharts().forEach(c => c.destroy());
+    this.chart1 = this.chart2 = this.chart3 = this.chart4 = null;
   }
 }
 

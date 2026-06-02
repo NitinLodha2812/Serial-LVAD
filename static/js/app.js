@@ -58,7 +58,7 @@ function enableCA(yes) {
 function enableCVR(yes) {
   ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrClearBtn', 'cvrCalcBtn',
    'cvrPeakBtn', 'cvrZoomMenu', 'cvrZoomBtn',
-   'cvrBrushBtn'].forEach(id => {
+   'cvrBrushBtn', 'cvrCo2WinBtn'].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -296,23 +296,66 @@ $('caZoomBtn').addEventListener('click', () => {
 
 /* ═══════════════════════ CVR — SELECT BASELINE ═══════════════════════ */
 
+const CVR_PLOT_IDS = ['cvrPlot1', 'cvrPlot2', 'cvrPlot3', 'cvrPlot4'];
+const cvrChartFor = (id) => ({
+  cvrPlot1: cvrCharts.chart1, cvrPlot2: cvrCharts.chart2,
+  cvrPlot3: cvrCharts.chart3, cvrPlot4: cvrCharts.chart4,
+}[id]);
+
 $('cvrSelectBaseBtn').addEventListener('click', () => {
   clickMode = 'cvr_base';
   toast('Click on a plot to set the baseline start point', 'info');
   appendLog('CVR: Click on plot to set baseline start.');
-  ['cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(id => $(id).parentElement.classList.add('clickable'));
+  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
 });
 
-['cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(id => {
-  $(id).addEventListener('click', async (e) => {
-    if (clickMode !== 'cvr_base' && clickMode !== 'cvr_hyp') return;
+// Pending CO2-window start time captured between the two clicks.
+let cvrCo2WinStart = null;
 
-    const chart = id === 'cvrPlot1' ? cvrCharts.chart1 :
-                  id === 'cvrPlot2' ? cvrCharts.chart2 : cvrCharts.chart3;
+CVR_PLOT_IDS.forEach(id => {
+  $(id).addEventListener('click', async (e) => {
+    if (!['cvr_base', 'cvr_hyp', 'cvr_co2win_start', 'cvr_co2win_end'].includes(clickMode)) return;
+
+    const chart = cvrChartFor(id);
     const clickX = cvrCharts.getClickX(chart, e);
     const mode = clickMode;
+
+    // ── CO2 search window: two-click select (start, then end) ──
+    if (mode === 'cvr_co2win_start') {
+      cvrCo2WinStart = clickX;
+      clickMode = 'cvr_co2win_end';
+      appendLog(`CVR: CO2 window start = ${clickX.toFixed(1)} s — click again to set end.`);
+      toast('Now click the end of the CO2 window', 'info');
+      return;
+    }
+    if (mode === 'cvr_co2win_end') {
+      const start = Math.min(cvrCo2WinStart, clickX);
+      const end   = Math.max(cvrCo2WinStart, clickX);
+      cvrCo2WinStart = null;
+      clickMode = null;
+      CVR_PLOT_IDS.forEach(i => $(i).parentElement.classList.remove('clickable'));
+      showLoading();
+      try {
+        const sel = await api('/api/cvr/select_co2_window', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ start_time: start, end_time: end }),
+        });
+        cvrCharts.addCo2Window(sel);
+        $('cvrCo2WinClearBtn').disabled = false;
+        appendLog(`CVR: CO2 search window set t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)} `
+                + `(${sel.n_samples} samples).`);
+        toast('CO2 search window set', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+        appendLog('CVR CO2-window error: ' + err.message);
+      }
+      hideLoading();
+      return;
+    }
+
     clickMode = null;
-    ['cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(i => $(i).parentElement.classList.remove('clickable'));
+    CVR_PLOT_IDS.forEach(i => $(i).parentElement.classList.remove('clickable'));
 
     showLoading();
     try {
@@ -350,7 +393,24 @@ $('cvrSelectHypBtn').addEventListener('click', () => {
   clickMode = 'cvr_hyp';
   toast('Click on a plot to set the hypercapnia start point', 'info');
   appendLog('CVR: Click on plot to set hypercapnia start.');
-  ['cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(id => $(id).parentElement.classList.add('clickable'));
+  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
+});
+
+/* ── CVR — Select CO2 Window (two-click: start then end) ── */
+$('cvrCo2WinBtn').addEventListener('click', () => {
+  clickMode = 'cvr_co2win_start';
+  cvrCo2WinStart = null;
+  toast('Click the START of the CO2 search window (gas on)', 'info');
+  appendLog('CVR: Click plot to set CO2 search window — start (gas on).');
+  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
+});
+
+$('cvrCo2WinClearBtn').addEventListener('click', () => {
+  cvrCharts.clearCo2Window();
+  cvrCo2WinStart = null;
+  $('cvrCo2WinClearBtn').disabled = true;
+  appendLog('CVR: CO2 search window cleared (peak-detect will fall back to hypercapnia window).');
+  toast('CO2 window cleared', 'info');
 });
 
 
@@ -361,6 +421,7 @@ $('cvrClearBtn').addEventListener('click', async () => {
     await api('/api/cvr/clear', { method: 'POST' });
     cvrCharts.clearOverlays();
     $('cvrResultBox').classList.add('hidden');
+    $('cvrCo2WinClearBtn').disabled = true;
     appendLog('CVR: Selections cleared.');
     toast('Selections cleared', 'info');
   } catch (err) { toast(err.message, 'error'); }
@@ -455,7 +516,7 @@ function toggleBrushMode(tab) {
   // Cancel any pending click-to-select mode if brushing is being turned on.
   if (s.mode) {
     clickMode = null;
-    ['caPlot1', 'caPlot2', 'cvrPlot1', 'cvrPlot2', 'cvrPlot3'].forEach(id => {
+    ['caPlot1', 'caPlot2', 'cvrPlot1', 'cvrPlot2', 'cvrPlot3', 'cvrPlot4'].forEach(id => {
       const el = $(id);
       if (el && el.parentElement) el.parentElement.classList.remove('clickable');
     });

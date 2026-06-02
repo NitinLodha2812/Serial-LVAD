@@ -26,12 +26,21 @@ COLUMN_ALIASES = {
     "mean_u": ["meanu"],                      # matches "1-1 Mean U", "Mean U", "meanU"
     "env_u":  ["envu"],                       # matches "1-1 Env U", "Env U", "envU"
     "etco2":  ["etco2"],                      # matches "ETCO2(mmHg)", "ETCO2" (not "CO2")
+    "co2":    ["co2"],                        # raw CO2 waveform — see COLUMN_EXCLUSIONS
     # ABP source: prefer fiABP (standard BP device); if that column is missing
     # or all-zero (no signal recorded), fall back to A-LINE (bedside arterial
     # line); finally accept any *abp* column. Data presence is checked at
     # resolution time so we never silently latch onto an empty channel.
     "abp":    ["fiabp", "aline", "abp"],
     "mark":   ["mark"],                       # marks/event column
+}
+
+# Substrings that disqualify a column from matching a given signal.
+# The raw CO2 waveform column is named like "CO2(mmHg)", which would also
+# match a bare "co2" pattern against "ETCO2(mmHg)". Excluding "etco2" here
+# guarantees the waveform resolver picks the right column.
+COLUMN_EXCLUSIONS = {
+    "co2": ["etco2"],
 }
 
 # Fallback positions used only if a column cannot be located by name.
@@ -88,11 +97,14 @@ def find_data_column(df, signal: str):
     import pandas as pd
     headers = list(df.columns)
     norm = [_normalize_header(h) for h in headers]
+    exclusions = COLUMN_EXCLUSIONS.get(signal, [])
     skipped = []
     for pattern in COLUMN_ALIASES.get(signal, []):
         for i, nh in enumerate(norm):
             if pattern not in nh:
                 continue
+            if any(ex in nh for ex in exclusions):
+                continue   # e.g. don't pick ETCO2 when looking for raw CO2
             arr = pd.to_numeric(df.iloc[:, i], errors="coerce").to_numpy(dtype=np.float64)
             if _column_has_data(arr):
                 return i, headers[i], skipped
@@ -123,6 +135,7 @@ class SessionState:
         self.env_u: np.ndarray = np.array([])
         self.abp: np.ndarray = np.array([])
         self.etco2: np.ndarray = np.array([])
+        self.co2: np.ndarray = np.array([])   # raw CO2 waveform (per-sample)
 
         # marks
         self.marks_labels: list = []
@@ -135,6 +148,8 @@ class SessionState:
         # CVR state
         self.cvr_baseline: dict | None = None   # {time, mean, env, co2}
         self.cvr_hypercap: dict | None = None   # {time, mean, env, co2}
+        self.cvr_co2_window: dict | None = None # {start, end} — search window
+                                                # for peak ETCO2 (gas-on → gas-off)
         self.cvr_peak_etco2: float | None = None
         self.cvr_peak_time: float | None = None
         self.cvr_result: dict | None = None
@@ -197,7 +212,7 @@ class SessionState:
         # column is all zeros. find_data_column() walks the alias list and
         # picks the first column that both matches by name AND has real data.
         resolved = {}
-        for signal in ("mean_u", "env_u", "etco2", "abp"):
+        for signal in ("mean_u", "env_u", "etco2", "co2", "abp"):
             idx, hdr, skipped = find_data_column(df, signal)
             if idx is not None:
                 if skipped:
@@ -235,6 +250,7 @@ class SessionState:
         self.mean_u = safe_col(resolved["mean_u"])
         self.env_u  = safe_col(resolved["env_u"])
         self.etco2  = safe_col(resolved["etco2"])
+        self.co2    = safe_col(resolved.get("co2"))
         self.abp    = safe_col(resolved["abp"])
 
         # parse marks – locate by name ("mark"), else fall back to last column
@@ -295,6 +311,7 @@ class SessionState:
             "abp":    self._to_list(self.abp, decimate),
             "mean_u": self._to_list(self.mean_u, decimate),
             "etco2":  self._to_list(self.etco2, decimate),
+            "co2":    self._to_list(self.co2, decimate),
             "marks_labels": self.marks_labels,
             "marks_times":  [round(t, 4) if not np.isnan(t) else None for t in self.marks_times],
             "patient_id": self.patient_id,
@@ -316,4 +333,5 @@ class SessionState:
             "abp":    self._to_list(self.abp[mask]),
             "mean_u": self._to_list(self.mean_u[mask]),
             "etco2":  self._to_list(self.etco2[mask]),
+            "co2":    self._to_list(self.co2[mask]) if self.co2.size else [],
         }
