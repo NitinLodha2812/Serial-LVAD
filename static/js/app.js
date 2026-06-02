@@ -126,7 +126,24 @@ $('fileInput').addEventListener('change', async (e) => {
     updateStatus(true);
 
     appendLog(`Loaded successfully — ${sessionData.total_samples} samples`);
-    toast('File loaded successfully', 'success');
+
+    // Surface the backend's load-time messages so the user sees which columns
+    // were matched (and any fallbacks / warnings — e.g. ABP fell back to A-LINE).
+    let warned = false;
+    (sessionData.load_log || []).forEach(line => {
+      if (/Matched|Fell back|WARNING/i.test(line)) {
+        appendLog(line.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, ''));
+        if (/WARNING/i.test(line)) warned = true;
+      }
+    });
+    if (sessionData.abp_source) {
+      appendLog(`ABP source: ${sessionData.abp_source}`);
+    }
+    if (warned) {
+      toast('Loaded with warnings — see Activity Log', 'info');
+    } else {
+      toast('File loaded successfully', 'success');
+    }
   } catch (err) {
     toast(err.message, 'error');
     appendLog(`Load error: ${err.message}`);
@@ -247,10 +264,14 @@ $('caCalcBtn').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vessel }),
     });
-    $('caResultValue').textContent = result.final_mx.toFixed(4);
+    const mxTxt = Number.isFinite(result.final_mx) ? result.final_mx.toFixed(4) : '—';
+    const mfv = result.mean_mfv;
+    const mfvTxt = (mfv == null || !Number.isFinite(mfv)) ? '—' : mfv.toFixed(2);
+    $('caResultValue').textContent = `${mxTxt} (${vessel})`;
+    $('caMeanMfv').textContent     = `${mfvTxt} (${vessel})`;
     $('caResultBox').classList.remove('hidden');
-    appendLog(`CA: MX = ${result.final_mx.toFixed(4)} (${vessel})`);
-    toast(`MX = ${result.final_mx.toFixed(4)}`, 'success');
+    appendLog(`CA: MX = ${mxTxt}, Mean MFV = ${mfvTxt} (${vessel})`);
+    toast(`MX = ${mxTxt}, Mean MFV = ${mfvTxt}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
     appendLog('CA calculate error: ' + err.message);

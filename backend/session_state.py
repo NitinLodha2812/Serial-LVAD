@@ -23,11 +23,15 @@ HYPERCAP_SAMPLES = 1250                     # ~10 s
 # the *first* (most specific) match wins — e.g. "fiabp" is preferred over a bare
 # "abp" fallback that might otherwise match "reABP".
 COLUMN_ALIASES = {
-    "mean_u": ["meanu"],            # matches "1-1 Mean U", "Mean U", "meanU"
-    "env_u":  ["envu"],             # matches "1-1 Env U", "Env U", "envU"
-    "etco2":  ["etco2"],            # matches "ETCO2(mmHg)", "ETCO2" (not "CO2")
-    "abp":    ["fiabp", "abp"],     # prefer fiABP; fall back to any *abp* col
-    "mark":   ["mark"],             # marks/event column
+    "mean_u": ["meanu"],                      # matches "1-1 Mean U", "Mean U", "meanU"
+    "env_u":  ["envu"],                       # matches "1-1 Env U", "Env U", "envU"
+    "etco2":  ["etco2"],                      # matches "ETCO2(mmHg)", "ETCO2" (not "CO2")
+    # ABP source: prefer fiABP (standard BP device); if that column is missing
+    # or all-zero (no signal recorded), fall back to A-LINE (bedside arterial
+    # line); finally accept any *abp* column. Data presence is checked at
+    # resolution time so we never silently latch onto an empty channel.
+    "abp":    ["fiabp", "aline", "abp"],
+    "mark":   ["mark"],                       # marks/event column
 }
 
 # Fallback positions used only if a column cannot be located by name.
@@ -48,6 +52,7 @@ def find_column(headers, signal: str):
     """
     Return the index of the column matching `signal`, or None if not found.
     Tries each alias substring in order against normalized headers.
+    Name-only (no data-presence check) — used for the marks column.
     """
     norm_headers = [_normalize_header(h) for h in headers]
     for pattern in COLUMN_ALIASES.get(signal, []):
@@ -55,6 +60,45 @@ def find_column(headers, signal: str):
             if pattern in nh:
                 return i
     return None
+
+
+def _column_has_data(arr: np.ndarray) -> bool:
+    """True if `arr` has at least one finite, non-zero value."""
+    if arr is None or len(arr) == 0:
+        return False
+    valid = ~np.isnan(arr)
+    if not valid.any():
+        return False
+    return bool((np.abs(arr[valid]) > 1e-12).any())
+
+
+def find_data_column(df, signal: str):
+    """
+    Resolve `signal` to a column that both (a) matches an alias by name and
+    (b) actually contains data (some non-zero, non-NaN sample).
+
+    Patterns are tried in order; within each pattern, every matching column is
+    inspected for data. A list of empty-but-name-matched headers is also
+    returned so the caller can explain what was skipped (e.g. "fiABP was
+    empty — used A-LINE instead").
+
+    Returns: (index, header, skipped_empty_headers)
+             (None, None, skipped_empty_headers) if nothing usable was found.
+    """
+    import pandas as pd
+    headers = list(df.columns)
+    norm = [_normalize_header(h) for h in headers]
+    skipped = []
+    for pattern in COLUMN_ALIASES.get(signal, []):
+        for i, nh in enumerate(norm):
+            if pattern not in nh:
+                continue
+            arr = pd.to_numeric(df.iloc[:, i], errors="coerce").to_numpy(dtype=np.float64)
+            if _column_has_data(arr):
+                return i, headers[i], skipped
+            if headers[i] not in skipped:
+                skipped.append(headers[i])
+    return None, None, skipped
 
 
 class SessionState:
@@ -146,15 +190,38 @@ class SessionState:
                 return np.full(n, np.nan)
             return pd.to_numeric(df.iloc[:, idx], errors='coerce').to_numpy(dtype=np.float64)
 
-        # Resolve each signal by *column name* (with positional fallback).
-        # The variable order in the export can change between recordings, so
-        # we never assume a fixed column index — see find_column().
+        # Resolve each signal by *column name and data presence*. The variable
+        # order in the export can change between recordings, and for some
+        # signals (notably ABP) a column may be present but empty — e.g. when
+        # the bedside A-LINE was used instead of our fiABP device, the fiABP
+        # column is all zeros. find_data_column() walks the alias list and
+        # picks the first column that both matches by name AND has real data.
         resolved = {}
         for signal in ("mean_u", "env_u", "etco2", "abp"):
-            idx = find_column(self.raw_headers, signal)
-            if idx is None:
+            idx, hdr, skipped = find_data_column(df, signal)
+            if idx is not None:
+                if skipped:
+                    self.log(
+                        f"Matched '{signal}' → column {idx} ({hdr!r}). "
+                        f"Fell back from empty: {', '.join(repr(s) for s in skipped)}."
+                    )
+                else:
+                    self.log(f"Matched '{signal}' → column {idx} ({hdr!r}).")
+            else:
+                # No name match with data. Decide between "all candidates empty"
+                # (worth a loud warning) vs "no name match at all" (use the old
+                # positional fallback so existing layouts still work).
                 fb = COLUMN_FALLBACK_POS.get(signal)
-                if fb is not None and fb < len(self.raw_headers):
+                if skipped:
+                    self.log(
+                        f"WARNING: '{signal}' source unavailable — every candidate "
+                        f"({', '.join(repr(s) for s in skipped)}) is empty or all-zero. "
+                        f"Calculations using {signal} will produce NaN."
+                    )
+                    # Keep the first empty match as the resolved column so the
+                    # Excel Master sheet still has the right column populated.
+                    idx = find_column(self.raw_headers, signal)
+                elif fb is not None and fb < len(self.raw_headers):
                     self.log(
                         f"WARNING: '{signal}' column not found by name — "
                         f"falling back to position {fb} ({self.raw_headers[fb]!r})."
@@ -162,8 +229,6 @@ class SessionState:
                     idx = fb
                 else:
                     self.log(f"WARNING: '{signal}' column not found — using NaN.")
-            else:
-                self.log(f"Matched '{signal}' → column {idx} ({self.raw_headers[idx]!r}).")
             resolved[signal] = idx
 
         self.column_positions = resolved
@@ -221,6 +286,9 @@ class SessionState:
 
     def get_overview_json(self, decimate=50):
         """Return decimated data for initial overview plots."""
+        # Surface the load-time log lines (column matches, fallbacks, warnings)
+        # so the frontend can show them in the Activity Log immediately. The
+        # client picks out lines tagged WARNING / Matched / Fell back.
         return {
             "time":   self._to_list(self.time, decimate),
             "env_u":  self._to_list(self.env_u, decimate),
@@ -233,6 +301,10 @@ class SessionState:
             "session": self.session,
             "total_samples": len(self.time),
             "sample_rate": SAMPLE_RATE,
+            "load_log": list(self.log_lines),
+            "abp_source": (self.raw_headers[self.column_positions["abp"]]
+                           if self.column_positions.get("abp") is not None
+                           else None),
         }
 
     def get_range_json(self, start_sec: float, end_sec: float):

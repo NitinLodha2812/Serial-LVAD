@@ -70,11 +70,19 @@ def compute_mx(abp: np.ndarray, env: np.ndarray):
     corr_coeffs = np.array(corr_coeffs)
     final_mx = float(np.nanmean(corr_coeffs)) if len(corr_coeffs) > 0 else np.nan
 
+    # Per-vessel mean MFV: simple average of the selected TCD envelope samples
+    # (full resolution). The vessel label (MCA / PCA) is applied by the caller.
+    if env.size > 0 and not np.all(np.isnan(env)):
+        mean_mfv = float(np.nanmean(env))
+    else:
+        mean_mfv = np.nan
+
     return {
         "MAP": calc_map.tolist(),
         "MFV": calc_mfv.tolist(),
         "corr_coeffs": corr_coeffs.tolist(),
         "final_mx": round(final_mx, 6),
+        "mean_mfv": None if np.isnan(mean_mfv) else round(mean_mfv, 4),
     }
 
 

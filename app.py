@@ -201,6 +201,9 @@ def api_ca_calculate():
         "MFV": pad(result["MFV"], max_n),
         "CorrCoeff": pad(result["corr_coeffs"], max_n),
         "FinalMX": [result["final_mx"]] * max_n,
+        # Per-vessel TCD-envelope average; vessel label is the user's choice
+        # at calc time and lives in the sheet name (MCA_CA / PCA_CA).
+        "MeanMFV": [result.get("mean_mfv")] * max_n,
     }
 
     result["table"] = table
