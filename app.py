@@ -5,7 +5,10 @@ app.py  –  Flask server for Serial LVAD Study
 import os, json, tempfile, shutil
 import numpy as np
 from flask import Flask, render_template, request, jsonify, send_from_directory
-from backend.session_state import SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, BASELINE_SAMPLES, HYPERCAP_SAMPLES
+from backend.session_state import (
+    SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, BASELINE_SAMPLES, HYPERCAP_SAMPLES,
+    window_end_for_valid_count,
+)
 from backend.calculations import compute_mx, compute_cvr
 from backend.export import save_excel, save_json
 
@@ -99,10 +102,28 @@ def api_ca_select():
     start_time = float(body.get("start_time", 0))
 
     idx_start = int(np.searchsorted(state.time, start_time))
-    idx_end = min(idx_start + FIVE_MIN_SAMPLES - 1, len(state.time) - 1)
 
-    if idx_end - idx_start + 1 < FIVE_MIN_SAMPLES:
-        state.log("CA: Not enough samples; using available samples")
+    # Extend the 5-min window past any brushed-out / NaN samples so it still
+    # captures FIVE_MIN_SAMPLES of *valid* data — a sample counts as valid only
+    # when both ABP and the TCD envelope are present, since the MX correlation
+    # consumes both. With no removed data this reduces to the original
+    # fixed-length window (idx_start + FIVE_MIN_SAMPLES - 1).
+    ca_valid = ~np.isnan(state.abp) & ~np.isnan(state.env_u)
+    idx_end, n_valid, exhausted = window_end_for_valid_count(
+        ca_valid, idx_start, FIVE_MIN_SAMPLES
+    )
+    n_extended = (idx_end - idx_start + 1) - FIVE_MIN_SAMPLES
+    if exhausted:
+        state.log(
+            f"CA: Not enough valid samples to fill a 5-min window "
+            f"({n_valid}/{FIVE_MIN_SAMPLES} valid); using all available data."
+        )
+    elif n_extended > 0:
+        state.log(
+            f"CA: Window extended by {n_extended} samples "
+            f"({n_extended / SAMPLE_RATE:.1f}s) to recover {FIVE_MIN_SAMPLES} "
+            f"valid samples past removed data."
+        )
 
     inds = slice(idx_start, idx_end + 1)
     # Preserve NaN samples in the selection — compute_mx slices the array
@@ -225,7 +246,25 @@ def api_cvr_select_baseline():
     body = request.get_json()
     start_time = float(body.get("start_time", 0))
     idx = int(np.searchsorted(state.time, start_time))
-    idx_end = min(idx + BASELINE_SAMPLES - 1, len(state.time) - 1)
+
+    # Extend the baseline window past removed/NaN samples so it still spans
+    # BASELINE_SAMPLES of valid data. A sample is valid only when meanU, envU
+    # and ETCO2 are all present, since the CVR baseline averages all three.
+    base_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u) & ~np.isnan(state.etco2)
+    idx_end, n_valid, exhausted = window_end_for_valid_count(
+        base_valid, idx, BASELINE_SAMPLES
+    )
+    n_extended = (idx_end - idx + 1) - BASELINE_SAMPLES
+    if exhausted:
+        state.log(
+            f"CVR: baseline could not reach {BASELINE_SAMPLES} valid samples "
+            f"({n_valid} found); using all available data."
+        )
+    elif n_extended > 0:
+        state.log(
+            f"CVR: baseline window extended by {n_extended} samples "
+            f"({n_extended / SAMPLE_RATE:.1f}s) past removed data."
+        )
     inds = slice(idx, idx_end + 1)
 
     # Preserve NaN; nanmean inside compute_cvr handles it correctly.
@@ -265,7 +304,24 @@ def api_cvr_select_hypercapnia():
     body = request.get_json()
     start_time = float(body.get("start_time", 0))
     idx = int(np.searchsorted(state.time, start_time))
-    idx_end = min(idx + HYPERCAP_SAMPLES - 1, len(state.time) - 1)
+
+    # Extend the hypercapnia window past removed/NaN samples so it still spans
+    # HYPERCAP_SAMPLES of valid data (meanU, envU and ETCO2 all present).
+    hyp_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u) & ~np.isnan(state.etco2)
+    idx_end, n_valid, exhausted = window_end_for_valid_count(
+        hyp_valid, idx, HYPERCAP_SAMPLES
+    )
+    n_extended = (idx_end - idx + 1) - HYPERCAP_SAMPLES
+    if exhausted:
+        state.log(
+            f"CVR: hypercapnia could not reach {HYPERCAP_SAMPLES} valid samples "
+            f"({n_valid} found); using all available data."
+        )
+    elif n_extended > 0:
+        state.log(
+            f"CVR: hypercapnia window extended by {n_extended} samples "
+            f"({n_extended / SAMPLE_RATE:.1f}s) past removed data."
+        )
     inds = slice(idx, idx_end + 1)
 
     sel_time = state.time[inds].copy()
@@ -432,6 +488,10 @@ def api_cvr_calculate():
         return jsonify(result), 400
 
     state.log(f"CVR: CVR calculation complete. MCVR = {result['mcvr']}, WCVR = {result['wcvr']}")
+    # Surface the CO2 driver behind the CVR result in the activity log only
+    # (not the CVR window): delta CO2 = hypercapnia CO2 - baseline CO2, where
+    # the hypercapnia value is the detected peak ETCO2 if one was set.
+    state.log(f"CVR: Delta CO2 (hypercapnia - baseline) = {result['delta_co2']} mmHg")
     state.cvr_result = result
 
     # Build export tables

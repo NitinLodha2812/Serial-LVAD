@@ -51,10 +51,53 @@ COLUMN_FALLBACK_POS = {
     "abp":    8,
 }
 
+# Minimum fraction of the recording a candidate column must cover with finite,
+# non-zero samples to count as a usable data source. This guards the ABP source
+# selection against a channel (e.g. fiABP) that carries a few valid values at
+# the very start of a session and then flat-lines to zero: such a column passes
+# a naive "has any data" test but is not a usable signal, so resolution should
+# fall through to the next candidate (A-LINE). Tune here if a legitimately
+# sparse signal is being rejected.
+MIN_DATA_COVERAGE = 0.5
+
 
 def _normalize_header(s) -> str:
     """Lowercase and strip non-alphanumeric characters from a header string."""
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def window_end_for_valid_count(valid_mask: np.ndarray, start_idx: int, target_valid: int):
+    """
+    Find the inclusive end index of the smallest window starting at `start_idx`
+    that contains `target_valid` valid samples, extending *past* removed/NaN
+    samples to compensate for "bad" data that was brushed out.
+
+    `valid_mask` is a boolean array (True = usable sample) over the full record.
+    When the selection has no removed data this returns exactly
+    `start_idx + target_valid - 1` (the original fixed-length behaviour). When
+    samples inside the span were removed, the end is pushed out until the
+    target number of valid samples has been collected.
+
+    Returns (end_idx, valid_in_window, exhausted):
+      end_idx        inclusive end index of the window (capped at the last sample)
+      valid_in_window number of valid samples actually captured
+      exhausted      True if the record ran out before the target was reached
+    """
+    n = len(valid_mask)
+    if n == 0 or start_idx >= n:
+        return max(n - 1, 0), 0, True
+    if target_valid <= 0:
+        return start_idx, int(bool(valid_mask[start_idx])), False
+
+    cumsum = np.cumsum(valid_mask[start_idx:].astype(np.int64))
+    total_valid = int(cumsum[-1])
+    if total_valid < target_valid:
+        # Not enough usable data left even using every remaining sample.
+        return n - 1, total_valid, True
+
+    # First offset where the cumulative valid count reaches the target.
+    hit = int(np.searchsorted(cumsum, target_valid, side="left"))
+    return start_idx + hit, target_valid, False
 
 
 def find_column(headers, signal: str):
@@ -71,14 +114,22 @@ def find_column(headers, signal: str):
     return None
 
 
+def _column_coverage(arr: np.ndarray) -> float:
+    """Fraction of `arr` that is finite and non-zero (0.0 .. 1.0).
+
+    Used to rank candidate data sources: a column that only carries data for a
+    brief stretch (e.g. an fiABP trace that zeros out after the first few
+    samples) has low coverage and should lose to a fuller alternative source.
+    """
+    if arr is None or len(arr) == 0:
+        return 0.0
+    nonzero_valid = ~np.isnan(arr) & (np.abs(arr) > 1e-12)
+    return float(nonzero_valid.sum()) / float(len(arr))
+
+
 def _column_has_data(arr: np.ndarray) -> bool:
     """True if `arr` has at least one finite, non-zero value."""
-    if arr is None or len(arr) == 0:
-        return False
-    valid = ~np.isnan(arr)
-    if not valid.any():
-        return False
-    return bool((np.abs(arr[valid]) > 1e-12).any())
+    return _column_coverage(arr) > 0.0
 
 
 def find_data_column(df, signal: str):
@@ -99,6 +150,7 @@ def find_data_column(df, signal: str):
     norm = [_normalize_header(h) for h in headers]
     exclusions = COLUMN_EXCLUSIONS.get(signal, [])
     skipped = []
+    best_partial = None  # (coverage, i, header) — best below-threshold candidate
     for pattern in COLUMN_ALIASES.get(signal, []):
         for i, nh in enumerate(norm):
             if pattern not in nh:
@@ -106,10 +158,25 @@ def find_data_column(df, signal: str):
             if any(ex in nh for ex in exclusions):
                 continue   # e.g. don't pick ETCO2 when looking for raw CO2
             arr = pd.to_numeric(df.iloc[:, i], errors="coerce").to_numpy(dtype=np.float64)
-            if _column_has_data(arr):
+            cov = _column_coverage(arr)
+            if cov >= MIN_DATA_COVERAGE:
+                # Adequately-covered match: honour alias priority order and take
+                # the first one (e.g. fiABP wins over A-LINE when both are good).
                 return i, headers[i], skipped
+            # Not enough coverage to be the preferred source. Remember it as a
+            # last-resort fallback (keep the fullest one) and keep looking for a
+            # better candidate further down the alias list.
+            if cov > 0.0 and (best_partial is None or cov > best_partial[0]):
+                best_partial = (cov, i, headers[i])
             if headers[i] not in skipped:
                 skipped.append(headers[i])
+    # No candidate cleared the coverage bar. Rather than drop the signal, fall
+    # back to the fullest partial source so a uniformly-sparse-but-real channel
+    # still resolves; don't report that one as skipped.
+    if best_partial is not None:
+        _, i, hdr = best_partial
+        skipped = [s for s in skipped if s != hdr]
+        return i, hdr, skipped
     return None, None, skipped
 
 
@@ -218,7 +285,7 @@ class SessionState:
                 if skipped:
                     self.log(
                         f"Matched '{signal}' → column {idx} ({hdr!r}). "
-                        f"Fell back from empty: {', '.join(repr(s) for s in skipped)}."
+                        f"Fell back from empty/low-data: {', '.join(repr(s) for s in skipped)}."
                     )
                 else:
                     self.log(f"Matched '{signal}' → column {idx} ({hdr!r}).")
@@ -230,7 +297,8 @@ class SessionState:
                 if skipped:
                     self.log(
                         f"WARNING: '{signal}' source unavailable — every candidate "
-                        f"({', '.join(repr(s) for s in skipped)}) is empty or all-zero. "
+                        f"({', '.join(repr(s) for s in skipped)}) is empty, all-zero, "
+                        f"or below the {MIN_DATA_COVERAGE:.0%} usable-data threshold. "
                         f"Calculations using {signal} will produce NaN."
                     )
                     # Keep the first empty match as the resolved column so the
