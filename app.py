@@ -2,9 +2,10 @@
 app.py  –  Flask server for Serial LVAD Study
 """
 
-import os, json, tempfile, shutil
+import os, json, math, tempfile, shutil
 import numpy as np
 from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask.json.provider import DefaultJSONProvider
 from backend.session_state import (
     SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, BASELINE_SAMPLES, HYPERCAP_SAMPLES,
     window_end_for_valid_count,
@@ -12,7 +13,36 @@ from backend.session_state import (
 from backend.calculations import compute_mx, compute_cvr
 from backend.export import save_excel, save_json
 
+
+def _json_safe(o):
+    """Recursively replace NaN/Inf floats with None so every response is strict,
+    browser-parseable JSON.
+
+    The calculations legitimately produce NaN — e.g. MAP/MFV/correlation values
+    for 3-second windows that fall on cleaned/removed data. Python's json module
+    emits these as the literal token ``NaN``, which is invalid JSON and makes the
+    browser's ``response.json()`` throw ("non-JSON response"), so a computed MX
+    would never reach the GUI. numpy.float64 subclasses float, so values straight
+    out of numpy are handled here too.
+    """
+    if isinstance(o, float):
+        return None if (math.isnan(o) or math.isinf(o)) else o
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    return o
+
+
+class SafeJSONProvider(DefaultJSONProvider):
+    """Flask JSON provider that scrubs NaN/Inf out of every response body."""
+
+    def dumps(self, obj, **kwargs):
+        return super().dumps(_json_safe(obj), **kwargs)
+
+
 app = Flask(__name__)
+app.json = SafeJSONProvider(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_uploads")
@@ -51,14 +81,27 @@ def api_load():
         safe_name = "upload.txt"
     filepath = os.path.join(UPLOAD_DIR, safe_name)
 
+    # A saved progress (.json) file is not a raw recording — it has no waveform
+    # samples — so feeding it to the CSV parser yields a confusing tokenizing
+    # error. Catch it early with a clear message instead.
+    if (f.filename or "").lower().endswith(".json"):
+        return jsonify({"error": (
+            "That looks like a saved progress (.json) file, not a raw recording. "
+            "Reopening saved progress isn't supported yet — please load the "
+            "original .txt/.csv recording."
+        )}), 400
+
     try:
         f.save(filepath)
     except Exception as e:
         return jsonify({"error": f"File save failed: {e}"}), 400
 
-    state = SessionState()
+    # Parse into a fresh state and only commit it to the global session on
+    # success. Otherwise a failed load (wrong file, bad format) would wipe the
+    # session the user is in the middle of working on.
+    new_state = SessionState()
     try:
-        state.load_txt(filepath, f.filename)
+        new_state.load_txt(filepath, f.filename)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -66,13 +109,14 @@ def api_load():
         return jsonify({"error": f"Parse error: {e}"}), 400
 
     try:
-        overview = state.get_overview_json()
+        overview = new_state.get_overview_json()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print(f"Overview error:\n{tb}")
         return jsonify({"error": f"Data processing error: {e}"}), 400
 
+    state = new_state
     return jsonify(overview)
 
 
@@ -633,15 +677,28 @@ def api_save():
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
 
+    # Nothing to write yet → openpyxl would raise "At least one sheet must be
+    # visible". Give a friendly message instead.
+    has_raw = bool(getattr(state, "raw_headers", None))
+    has_results = any(state.results[a][v] for a in ("CA", "CVR") for v in ("MCA", "PCA"))
+    if not has_raw and not has_results:
+        return jsonify({"error": "Nothing to save yet — load a recording first."}), 400
+
     body = request.get_json() or {}
     fmt = body.get("format", "excel")
 
-    if fmt == "json":
-        fname = save_json(state, EXPORT_DIR)
-        state.log(f"Saved JSON: {fname}")
-    else:
-        fname = save_excel(state, EXPORT_DIR)
-        state.log(f"Saved Excel: {fname}")
+    try:
+        if fmt == "json":
+            fname = save_json(state, EXPORT_DIR)
+            state.log(f"Saved JSON: {fname}")
+        else:
+            fname = save_excel(state, EXPORT_DIR)
+            state.log(f"Saved Excel: {fname}")
+    except Exception as e:
+        import traceback
+        print(f"Save error:\n{traceback.format_exc()}")
+        state.log(f"Save failed: {e}")
+        return jsonify({"error": f"Save failed: {e}"}), 500
 
     return jsonify({"filename": fname})
 

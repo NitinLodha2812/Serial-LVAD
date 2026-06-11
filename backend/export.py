@@ -43,8 +43,12 @@ def save_json(state: SessionState, out_dir: str) -> str:
             if r is not None:
                 payload["results"][analysis][vessel] = _serialise_dict(r)
 
+    # allow_nan=False is a tripwire: the payload is already NaN-scrubbed by
+    # _serialise_dict, so this should never fire — but if a NaN ever slips
+    # through we want a loud failure (caught by the save route) rather than a
+    # silently invalid file that browsers and other tools refuse to parse.
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2, default=str)
+        json.dump(payload, f, indent=2, default=str, allow_nan=False)
     return fname
 
 
@@ -113,13 +117,20 @@ def save_excel(state: SessionState, out_dir: str) -> str:
 
 
 def _serialise_dict(d):
-    """Recursively convert numpy types for JSON."""
+    """Recursively convert numpy types for JSON and replace NaN/Inf with None.
+
+    NaN is expected in the results (e.g. correlation values over cleaned
+    windows); leaving it in produces the literal token ``NaN``, which is not
+    valid JSON, so the saved progress file fails to reopen in any strict parser.
+    """
     if isinstance(d, dict):
         return {k: _serialise_dict(v) for k, v in d.items()}
     if isinstance(d, (list, tuple)):
         return [_serialise_dict(x) for x in d]
     if isinstance(d, np.ndarray):
-        return d.tolist()
+        return _serialise_dict(d.tolist())
     if isinstance(d, (np.floating, np.integer)):
-        return float(d)
+        d = float(d)
+    if isinstance(d, float):
+        return None if (np.isnan(d) or np.isinf(d)) else d
     return d
