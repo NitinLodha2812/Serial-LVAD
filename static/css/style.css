@@ -613,3 +613,237 @@ body { padding-bottom: 40px; }
 
 /* clickable plot cursor */
 .plot-wrap.clickable canvas { cursor: crosshair; }
+
+/* ═══════════════════════════════════════════════════════════════
+   PI TAB — epoch selection
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  --native:     #1E8449;
+  --native-light:#E8F6ED;
+  --artificial: #C0392B;
+  --artificial-light:#FDEDED;
+}
+
+.plot-wrap.tall { height: 340px; }
+
+.plot-card .plot-title .plot-hint {
+  float: right;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  opacity: .75;
+}
+
+/* labelled inputs in the sidebar */
+.pi-fields { display: flex; flex-direction: column; gap: 8px; }
+
+.pi-auto-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pi-field { display: flex; flex-direction: column; gap: 3px; }
+
+.pi-field label {
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+}
+
+.pi-field input {
+  font-family: var(--font-body);
+  font-size: .84rem;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+  min-width: 0;
+}
+
+.pi-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+
+.pi-field input[type="file"] { padding: 5px; font-size: .72rem; }
+.pi-field input:disabled { background: var(--bg); color: var(--text-muted); }
+
+/* native / artificial accent buttons */
+.btn-native:not(:disabled) {
+  background: var(--native-light);
+  border-color: var(--native);
+  color: var(--native);
+  font-weight: 600;
+}
+.btn-native:not(:disabled):hover { background: var(--native); color: #fff; }
+
+.btn-artificial:not(:disabled) {
+  background: var(--artificial-light);
+  border-color: var(--artificial);
+  color: var(--artificial);
+  font-weight: 600;
+}
+.btn-artificial:not(:disabled):hover { background: var(--artificial); color: #fff; }
+
+/* counters */
+.result-box .result-sub {
+  font-size: .7rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}
+
+.result-box.result-native {
+  background: var(--native-light);
+  border-color: var(--native);
+}
+.result-box.result-native .result-label,
+.result-box.result-native .result-value { color: var(--native); }
+
+.result-box.result-artificial {
+  background: var(--artificial-light);
+  border-color: var(--artificial);
+}
+.result-box.result-artificial .result-label,
+.result-box.result-artificial .result-value { color: var(--artificial); }
+
+/* epoch table */
+.epoch-table-wrap {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.epoch-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+  font-family: var(--font-mono);
+}
+
+.epoch-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 7px 9px;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  z-index: 1;
+}
+
+.epoch-table tbody td {
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.epoch-table tbody tr:hover { background: var(--bg); }
+.epoch-table tbody tr.row-native td:nth-child(2) { color: var(--native); font-weight: 500; }
+.epoch-table tbody tr.row-artificial td:nth-child(2) { color: var(--artificial); font-weight: 500; }
+
+.epoch-table input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+}
+
+.epoch-table .epoch-empty td {
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  padding: 18px;
+}
+
+.epoch-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.epoch-actions .btn { width: auto; }
+
+.epoch-note {
+  font-size: .72rem;
+  color: var(--text-muted);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MODAL (PI speed picker)
+   ═══════════════════════════════════════════════════════════════ */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(44, 42, 38, .35);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 400;
+}
+
+.modal-backdrop.active { display: flex; }
+
+.modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: min(460px, 92vw);
+  overflow: hidden;
+}
+
+.modal-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: .95rem;
+}
+
+.modal-body { padding: 10px 0; max-height: 46vh; overflow-y: auto; }
+
+.modal-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.speed-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 11px 18px;
+  border: none;
+  background: none;
+  font-family: var(--font-body);
+  font-size: .86rem;
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.speed-list button:hover { background: var(--accent-light); }
+
+.speed-list .speed-meta {
+  display: block;
+  font-size: .72rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+}

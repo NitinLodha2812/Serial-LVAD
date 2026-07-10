@@ -39,6 +39,7 @@
     <button class="tab-btn active" data-tab="main">Main Screen</button>
     <button class="tab-btn" data-tab="ca">CA (MX)</button>
     <button class="tab-btn" data-tab="cvr">CVR</button>
+    <button class="tab-btn" data-tab="pi">PI (Epochs)</button>
   </nav>
 
   <!-- ════════════════════ MAIN TAB ════════════════════ -->
@@ -195,6 +196,137 @@
       </div>
     </div>
   </section>
+
+  <!-- ════════════════════ PI TAB ════════════════════ -->
+  <section id="tab-pi" class="tab-panel">
+    <div class="analysis-layout">
+      <div class="plots-area">
+        <div class="plot-card">
+          <div class="plot-title">
+            TCD envU — beat epochs
+            <span class="plot-hint" id="piZoomHint">drag to brush · wheel to zoom · shift+drag to pan</span>
+          </div>
+          <div class="plot-wrap tall"><canvas id="piPlot"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Selected Epochs</h3></div>
+          <div class="card-body">
+            <div class="epoch-table-wrap">
+              <table class="epoch-table" id="piEpochTable">
+                <thead>
+                  <tr>
+                    <th style="width:28px;"><input type="checkbox" id="piEpochAll" title="Select all"></th>
+                    <th>Epoch</th><th>Start (s)</th><th>End (s)</th>
+                    <th>Hi</th><th>Lo</th><th>Mean</th><th>PW (s)</th><th>PI</th>
+                  </tr>
+                </thead>
+                <tbody id="piEpochBody">
+                  <tr class="epoch-empty"><td colspan="9">No epochs selected yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="epoch-actions">
+              <button class="btn btn-danger btn-sm" id="piDeselectBtn" disabled>Remove Checked</button>
+              <span class="epoch-note">PI = (Hi − Lo) / Mean &nbsp;·&nbsp; PW = epoch duration</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls-sidebar">
+        <div class="pi-fields">
+          <div class="pi-field">
+            <label for="piSpeed">Session / Speed</label>
+            <input type="text" id="piSpeed" placeholder="e.g. 1" disabled>
+          </div>
+          <div class="pi-field">
+            <label for="piVessel">Vessel</label>
+            <input type="text" id="piVessel" placeholder="e.g. MCA" disabled>
+          </div>
+        </div>
+
+        <button class="btn" id="piBrushBtn" disabled>Brush: ON</button>
+        <button class="btn btn-native" id="piNativeBtn" disabled>Select Native</button>
+        <button class="btn btn-artificial" id="piArtificialBtn" disabled>Select Artificial</button>
+        <button class="btn btn-sm" id="piBrushClearBtn" disabled>Clear Brush</button>
+
+        <div class="section-divider"></div>
+
+        <div class="pi-auto-row">
+          <div class="pi-field">
+            <label for="piInterval">Interval (s)</label>
+            <input type="number" id="piInterval" value="2" min="0.05" step="0.05" disabled>
+          </div>
+          <div class="pi-field">
+            <label for="piHalfWidth">± Half-width (s)</label>
+            <input type="number" id="piHalfWidth" value="0.2" min="0.01" step="0.01" disabled>
+          </div>
+        </div>
+        <button class="btn" id="piAutoBtn" disabled>Auto-Select Artificial</button>
+
+        <div class="section-divider"></div>
+
+        <button class="btn" id="piUndoBtn" disabled>Undo Last</button>
+        <button class="btn btn-danger" id="piClearBtn" disabled>Clear All Selections</button>
+
+        <div class="section-divider"></div>
+
+        <select class="btn" id="piZoomMenu" disabled>
+          <option value="home">Zoom Home</option>
+          <option value="scale30">Scale to 30 s</option>
+          <option value="scale5">Scale to 5 min</option>
+        </select>
+        <button class="btn btn-sm" id="piZoomBtn" disabled>Apply Zoom</button>
+
+        <div class="section-divider"></div>
+
+        <button class="btn" id="piLoadSpeedBtn" disabled>Load Speed…</button>
+        <button class="btn" id="piLoadAllBtn" disabled>Load All Speeds</button>
+        <button class="btn" id="piNextSpeedBtn" disabled>Save &amp; Next Speed</button>
+
+        <div class="section-divider"></div>
+
+        <div class="pi-field">
+          <label for="piWorkbook">Prior workbook (optional)</label>
+          <input type="file" id="piWorkbook" accept=".xlsx,.xls" disabled>
+        </div>
+        <button class="btn btn-primary" id="piExportBtn" disabled>Export to Excel</button>
+
+        <div class="section-divider"></div>
+
+        <div class="result-grid">
+          <div class="result-box result-native">
+            <div class="result-label">Native</div>
+            <div class="result-value" id="piNativeCount">0</div>
+            <div class="result-sub" id="piNativePI">PI —</div>
+          </div>
+          <div class="result-box result-artificial">
+            <div class="result-label">Artificial</div>
+            <div class="result-value" id="piArtificialCount">0</div>
+            <div class="result-sub" id="piArtificialPI">PI —</div>
+          </div>
+        </div>
+
+        <div class="marks-panel" id="piMarksPanel">
+          <div class="marks-header">Marks</div>
+          <div class="marks-list" id="piMarksList"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── PI: load-speed picker modal ── -->
+  <div class="modal-backdrop" id="piSpeedModal">
+    <div class="modal">
+      <div class="modal-header">Load Saved Speed</div>
+      <div class="modal-body">
+        <div class="speed-list" id="piSpeedList"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" id="piSpeedCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <!-- status bar -->
   <footer class="status-bar">

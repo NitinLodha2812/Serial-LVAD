@@ -4,11 +4,16 @@ Handles saving session data to Excel (unified workbook) and JSON (progress save)
 Mirrors the MATLAB localSave function.
 """
 
-import json, os
+import json, os, re
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from .session_state import SessionState, SAMPLE_RATE
+from . import pi_analysis
+
+# Sheet PI.m reads from and writes back to.
+PI_SHEET = "PI Demographics"
+PI_LEAD_COLUMNS = ("PatientID", "SessionSpeed", "Vessel")
 
 
 def _nan_safe(v):
@@ -42,6 +47,20 @@ def save_json(state: SessionState, out_dir: str) -> str:
             r = state.results[analysis][vessel]
             if r is not None:
                 payload["results"][analysis][vessel] = _serialise_dict(r)
+
+    # PI epochs: metrics and time bounds only. The per-sample waveform stays
+    # out of the progress file — it is recoverable from the raw recording, and
+    # a few hundred epochs of it would dwarf everything else here.
+    if state.pi_epochs:
+        payload["results"]["PI"] = {
+            "speed": state.pi_speed,
+            "vessel": state.pi_vessel,
+            "summary": pi_analysis.summarize(state.pi_epochs),
+            "epochs": [
+                _serialise_dict({k: v for k, v in e.items() if k not in ("time", "amp")})
+                for e in pi_analysis.numbered(state.pi_epochs)
+            ],
+        }
 
     # allow_nan=False is a tripwire: the payload is already NaN-scrubbed by
     # _serialise_dict, so this should never fire — but if a NaN ever slips
@@ -113,6 +132,63 @@ def save_excel(state: SessionState, out_dir: str) -> str:
             })
             marks_df.to_excel(writer, sheet_name="Marks", index=False)
 
+    return fname
+
+
+def _safe_stem(s: str) -> str:
+    return re.sub(r"[^\w.\-]", "_", (s or "").strip()) or "PI"
+
+
+def save_pi_excel(row: dict, out_dir: str,
+                  prior_path: str | None = None,
+                  prior_filename: str | None = None,
+                  fallback_stem: str = "PI") -> str:
+    """
+    Append one PI row to the "PI Demographics" sheet and write a new workbook.
+
+    PI.m opens an existing spreadsheet, adds the row, pads both sides with NaN
+    so old and new column sets line up, and saves under a timestamped name —
+    never overwriting the source. Same contract here, with two differences:
+    the prior workbook is optional (with none, the sheet is created fresh), and
+    any *other* sheets in that workbook are carried across rather than dropped,
+    which is what MATLAB's writetable does to them.
+    """
+    ts = datetime.now().strftime("%d%b%Y_%H%M%S")
+    other_sheets: dict[str, pd.DataFrame] = {}
+
+    if prior_path:
+        book = pd.read_excel(prior_path, sheet_name=None)
+        if PI_SHEET not in book:
+            raise ValueError(
+                f"Prior workbook has no '{PI_SHEET}' sheet "
+                f"(found: {', '.join(book) or 'no sheets'})."
+            )
+        old = book.pop(PI_SHEET)
+        other_sheets = book
+        stem = os.path.splitext(prior_filename or os.path.basename(prior_path))[0]
+        if "---" in stem:
+            stem = stem.split("---")[0]
+    else:
+        old = pd.DataFrame()
+        stem = fallback_stem
+
+    new_row = pd.DataFrame([row])
+    # Concatenating onto an empty frame warns and can coerce dtypes in pandas
+    # 2.x, so short-circuit the first-row case.
+    combined = new_row if old.empty else pd.concat([old, new_row], ignore_index=True)
+
+    # PI.m orders columns as the three IDs, then MATLAB's setdiff() output —
+    # which is sorted. Mirror that so appended rows always align.
+    lead = [c for c in PI_LEAD_COLUMNS if c in combined.columns]
+    rest = sorted(c for c in combined.columns if c not in lead)
+    combined = combined[lead + rest]
+
+    fname = f"{_safe_stem(stem)}---{ts}.xlsx"
+    path = os.path.join(out_dir, fname)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        combined.to_excel(writer, sheet_name=PI_SHEET, index=False)
+        for name, df in other_sheets.items():
+            df.to_excel(writer, sheet_name=name, index=False)
     return fname
 
 

@@ -16,7 +16,16 @@ const COLORS = {
   selCo2W:  '#F39C12',   // CO2 search window
   peak:     '#C0392B',
   mark:     'rgba(192, 57, 43, .55)',
+  native:     '#1E8449',
+  artificial: '#C0392B',
 };
+
+/* Distinct colours per saved speed in the "Load All Speeds" overlay —
+   MATLAB's lines(n) colormap. */
+const SPEED_COLORS = [
+  '#0072BD', '#D95319', '#EDB120', '#7E2F8E',
+  '#77AC30', '#4DBEEE', '#A2142F', '#2C2A26',
+];
 
 /* ── helper: build {x,y} data from two arrays, skipping nulls ── */
 function xyData(timeArr, valArr) {
@@ -59,7 +68,7 @@ if (typeof Chart !== 'undefined') Chart.register(brushDrawPlugin);
    `signal` is the backend name (mean_u / env_u / etco2 / abp).
    `onChange(state)` fires whenever the brushed-points set changes,
    so the host app can enable/disable "Replace with NaN" buttons. */
-function attachBrush(chart, signal, onChange) {
+function attachBrush(chart, signal, onChange, opts = {}) {
   if (!chart || chart.$brush) return;
   chart.$brush = {
     signal,
@@ -69,12 +78,16 @@ function attachBrush(chart, signal, onChange) {
     endPx: null,
     rect: null,           // data-coords {x_min, x_max, y_min, y_max}
     onChange: onChange || (() => {}),
+    // PI brushes constantly, so it keeps wheel-zoom and shift-pan live rather
+    // than trading them away for the drag gesture (see setChartBrushMode).
+    allowPan: !!opts.allowPan,
   };
   const canvas = chart.canvas;
 
   function mousedown(e) {
     if (!chart.$brush.active) return;
     if (e.button !== 0) return;            // left click only
+    if (chart.$brush.allowPan && e.shiftKey) return;   // shift+drag pans instead
     e.preventDefault();
     const r = canvas.getBoundingClientRect();
     chart.$brush.dragging = true;
@@ -159,8 +172,9 @@ function setChartBrushMode(chart, on) {
   chart.$brush.active = !!on;
   const z = chart.options?.plugins?.zoom;
   if (z) {
-    z.zoom.wheel.enabled = !on;
-    z.pan.enabled = !on;
+    const keep = chart.$brush.allowPan;
+    z.zoom.wheel.enabled = keep || !on;
+    z.pan.enabled = keep || !on;
   }
   chart.canvas.style.cursor = on ? 'crosshair' : '';
   chart.update('none');
@@ -680,5 +694,217 @@ class CVRCharts {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   PI Chart — single envelope plot with beat-epoch overlays
+   Port of PI.m's axes1.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Every dataset the PI chart layers over its trace. The `_`-prefixed variants
+   are the same overlays hidden from the legend, so both spellings must be
+   recognised here or they leak across redraws. */
+function _isPIOverlay(label) {
+  const l = (label || '').replace(/^_/, '');
+  return l.startsWith('speed_') || l === 'Native' || l === 'Artificial';
+}
+
+/* Chain each epoch's points into one dataset per class, separated by a
+   null-y break so Chart.js lifts the pen between beats instead of drawing
+   a line across the gap. Two datasets total beats hundreds of them. */
+function _epochSeries(epochs) {
+  const pts = [];
+  const sorted = [...epochs].sort((a, b) => a.t_start - b.t_start);
+  sorted.forEach((e, i) => {
+    if (i > 0) pts.push({ x: e.t_start, y: null });
+    for (let k = 0; k < e.time.length; k++) pts.push({ x: e.time[k], y: e.amp[k] });
+  });
+  return pts;
+}
+
+class PIChart {
+  constructor() {
+    this.chart = null;
+    this.marksVisible = new Set();
+    this.onBrushChange = () => {};
+    this.onViewChange = () => {};   // fires after zoom/pan so the host refetches
+  }
+
+  init(data) {
+    this.destroy();
+    this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
+    const ann = markAnnotations(data.marks_labels, data.marks_times, this.marksVisible);
+
+    // Full extent of the recording. The trace is later swapped for whatever
+    // slice is on screen, so the zoom limits must come from the recording
+    // rather than from the currently-loaded points — otherwise zooming in
+    // would shrink the reachable range and strand the user.
+    this.tMin = 0;
+    this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
+
+    const options = makeChartOptions('envU (cm/s)', { ...ann });
+    // Overlay datasets are drawn from epochs sorted by start time, but two
+    // brushed beats may overlap by a sample; `normalized` promises Chart.js a
+    // strictly ascending x, so don't make that promise here.
+    options.normalized = false;
+    options.scales.x.min = this.tMin;
+    options.scales.x.max = this.tMax;
+    options.plugins.legend = {
+      display: true,
+      position: 'top',
+      align: 'end',
+      labels: {
+        boxWidth: 10, boxHeight: 10, font: { size: 10 },
+        filter: (item) => !item.text.startsWith('_'),
+      },
+    };
+    options.plugins.zoom.limits = { x: { min: this.tMin, max: this.tMax } };
+    options.plugins.zoom.zoom.onZoomComplete = () => this.onViewChange();
+    options.plugins.zoom.pan.onPanComplete = () => this.onViewChange();
+
+    this.chart = new Chart(document.getElementById('piPlot'), {
+      type: 'line',
+      data: {
+        datasets: [{
+          label: '_trace',
+          data: xyData(data.time, data.env_u),
+          borderColor: COLORS.envU,
+        }],
+      },
+      options,
+    });
+
+    attachBrush(this.chart, 'env_u', (s) => this.onBrushChange(s), { allowPan: true });
+    this.data = data;
+  }
+
+  /* Swap in a freshly-fetched (higher-resolution) trace without disturbing
+     the epoch overlays that sit above it. */
+  setTrace(time, env) {
+    if (!this.chart) return;
+    this.chart.data.datasets[0].data = xyData(time, env);
+    this.chart.update('none');
+  }
+
+  /* ── brush API (mirrors CACharts / CVRCharts) ── */
+  setBrushMode(on) { setChartBrushMode(this.chart, on); }
+  activeBrush() {
+    const c = this.chart;
+    if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
+    return null;
+  }
+  clearBrush() { clearChartBrush(this.chart); }
+
+  /* ── epoch overlays ── */
+  setEpochs(epochs) {
+    if (!this.chart) return;
+    this._clearOverlays();
+    const groups = [
+      ['Native', COLORS.native, epochs.filter(e => e.type === 'native')],
+      ['Artificial', COLORS.artificial, epochs.filter(e => e.type === 'artificial')],
+    ];
+    for (const [label, color, items] of groups) {
+      if (!items.length) continue;
+      this.chart.data.datasets.push({
+        label,
+        data: _epochSeries(items),
+        borderColor: color,
+        backgroundColor: color,
+        borderWidth: 1.8,
+        borderDash: [5, 3],
+        pointRadius: 2,
+        pointHoverRadius: 2,
+        spanGaps: false,
+        order: -1,
+      });
+    }
+    this.chart.update('none');
+  }
+
+  /* Read-only comparison of every saved speed, one colour each. */
+  setAllSpeeds(speeds) {
+    if (!this.chart) return;
+    this._clearOverlays();
+    speeds.forEach((sp, i) => {
+      const color = SPEED_COLORS[i % SPEED_COLORS.length];
+      const label = `speed_${sp.speed || '—'} (N:${sp.n_native} A:${sp.n_artificial})`;
+      const nat = sp.epochs.filter(e => e.type === 'native');
+      const art = sp.epochs.filter(e => e.type === 'artificial');
+      if (nat.length) {
+        this.chart.data.datasets.push({
+          label, data: _epochSeries(nat),
+          borderColor: color, backgroundColor: color,
+          borderWidth: 2, pointRadius: 1.5, spanGaps: false, order: -1,
+        });
+      }
+      if (art.length) {
+        this.chart.data.datasets.push({
+          // Only the first dataset for a speed carries the legend label, so
+          // the legend lists each speed once rather than twice.
+          label: nat.length ? '_' + label : label,
+          data: _epochSeries(art),
+          borderColor: color, backgroundColor: color,
+          borderWidth: 2, borderDash: [5, 3], pointRadius: 1.5,
+          spanGaps: false, order: -1,
+        });
+      }
+    });
+    this.chart.update('none');
+  }
+
+  /* Drop every epoch / all-speeds overlay, keeping the trace at index 0 and
+     any in-progress brush highlight. */
+  _clearOverlays() {
+    this.chart.data.datasets = this.chart.data.datasets.filter(
+      (d, i) => i === 0 || !_isPIOverlay(d.label)
+    );
+  }
+
+  updateMarks(visibleSet) {
+    this.marksVisible = visibleSet;
+    if (!this.chart) return;
+    const ann = this.chart.options.plugins.annotation.annotations;
+    for (const key in ann) {
+      if (key.startsWith('mark_')) {
+        const idx = parseInt(key.split('_')[1]);
+        ann[key].display = visibleSet.has(idx);
+        if (ann[key].label) ann[key].label.display = visibleSet.has(idx);
+      }
+    }
+    this.chart.update('none');
+  }
+
+  resetZoom() {
+    this.zoomToRange(this.tMin, this.tMax - this.tMin);
+  }
+
+  zoomToRange(start, duration) {
+    if (!this.chart) return;
+    const lo = Math.max(this.tMin, Math.min(start, this.tMax));
+    const hi = Math.min(this.tMax, lo + duration);
+    this.chart.options.scales.x.min = lo;
+    this.chart.options.scales.x.max = hi > lo ? hi : this.tMax;
+    this.chart.update('none');
+    this.onViewChange();
+  }
+
+  getXRange() {
+    if (!this.chart) return { min: 0, max: 1 };
+    const { min, max } = this.chart.scales.x;
+    return {
+      min: Number.isFinite(min) ? min : this.tMin,
+      max: Number.isFinite(max) ? max : this.tMax,
+    };
+  }
+
+  getClickX(event) {
+    const rect = this.chart.canvas.getBoundingClientRect();
+    return this.chart.scales.x.getValueForPixel(event.clientX - rect.left);
+  }
+
+  destroy() {
+    if (this.chart) { this.chart.destroy(); this.chart = null; }
+  }
+}
+
 window.CACharts = CACharts;
 window.CVRCharts = CVRCharts;
+window.PIChart = PIChart;

@@ -11,7 +11,8 @@ from backend.session_state import (
     window_end_for_valid_count,
 )
 from backend.calculations import compute_mx, compute_cvr
-from backend.export import save_excel, save_json
+from backend.export import save_excel, save_json, save_pi_excel
+from backend import pi_analysis
 
 
 def _json_safe(o):
@@ -47,8 +48,12 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_uploads")
 EXPORT_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_exports")
+# PI selections auto-save here, one file per (recording, speed) — the web
+# equivalent of PI.m's `<basename>_speed<N>_selections.mat` beside the data.
+PI_SESSION_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_pi_sessions")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
+os.makedirs(PI_SESSION_DIR, exist_ok=True)
 
 # ── global session state (single-user desktop app) ──
 state: SessionState | None = None
@@ -639,6 +644,348 @@ def api_edit_nan():
         "changed": total_changed,
         "total_nan": int(np.isnan(arr).sum()),
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  PI – PULSATILITY INDEX (port of PI.m)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _pi_payload():
+    """Everything the PI tab needs to redraw itself after any mutation."""
+    return {
+        "epochs": pi_analysis.numbered(state.pi_epochs),
+        "summary": pi_analysis.summarize(state.pi_epochs),
+        "speed": state.pi_speed,
+        "vessel": state.pi_vessel,
+        "patient_id": state.patient_id,
+        "base_name": state.base_name,
+    }
+
+
+def _pi_autosave():
+    """
+    Persist the current selections for the current speed.
+
+    PI.m auto-saves on every change to `updateSelectionCount`, so a crash or a
+    mis-click never costs an afternoon of brushing. Failures are logged, not
+    raised — losing the auto-save must not fail the selection that triggered it.
+    """
+    if not state.base_name:
+        return None
+    payload = {
+        "base_name": state.base_name,
+        "patient_id": state.patient_id,
+        "speed": state.pi_speed,
+        "vessel": state.pi_vessel,
+        "epochs": state.pi_epochs,
+    }
+    try:
+        return pi_analysis.save_session(PI_SESSION_DIR, state.base_name, state.pi_speed, payload)
+    except Exception as e:
+        state.log(f"PI: WARNING — auto-save failed: {e}")
+        return None
+
+
+@app.route("/api/pi/trace")
+def api_pi_trace():
+    """Envelope trace for the visible window, decimated only as needed."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    start = float(request.args.get("start", 0))
+    end = float(request.args.get("end", state.time[-1] if len(state.time) else 0))
+    try:
+        max_points = int(request.args.get("max_points", 8000))
+    except ValueError:
+        max_points = 8000
+    max_points = max(500, min(max_points, 50000))
+    return jsonify(state.get_pi_trace(start, end, max_points))
+
+
+@app.route("/api/pi/state")
+def api_pi_state():
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/meta", methods=["POST"])
+def api_pi_meta():
+    """Update the PI tab's Session/Speed and Vessel fields."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    if "speed" in body:
+        state.pi_speed = str(body["speed"]).strip()
+    if "vessel" in body:
+        state.pi_vessel = str(body["vessel"]).strip()
+    return jsonify({"ok": True, "speed": state.pi_speed, "vessel": state.pi_vessel})
+
+
+@app.route("/api/pi/select", methods=["POST"])
+def api_pi_select():
+    """
+    Commit the brushed rectangle as one Native or Artificial epoch.
+
+    The rectangle arrives in data coordinates; the samples are taken from the
+    full-resolution envelope, not from whatever the chart happened to be
+    displaying, so a decimated view never truncates an epoch.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+
+    body = request.get_json() or {}
+    kind = str(body.get("type", "")).lower()
+    if kind not in (pi_analysis.NATIVE, pi_analysis.ARTIFICIAL):
+        return jsonify({"error": "type must be 'native' or 'artificial'"}), 400
+
+    rect = body.get("rect") or {}
+    try:
+        {k: float(rect[k]) for k in ("x_min", "x_max", "y_min", "y_max")}
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "rect needs numeric x_min, x_max, y_min, y_max"}), 400
+
+    t, a = pi_analysis.extract_rect(state.time, state.env_u, rect)
+    if len(t) == 0:
+        return jsonify({"error": "No envelope samples inside the brushed region."}), 400
+
+    epoch = pi_analysis.make_epoch(state.pi_next_id, kind, t, a)
+    state.pi_next_id += 1
+    state.pi_epochs.append(epoch)
+    state.log(
+        f"PI: selected {kind} epoch #{epoch['id']} "
+        f"t={epoch['t_start']:.2f}..{epoch['t_end']:.2f} "
+        f"({epoch['n_samples']} samples, PI={epoch['pi']})"
+    )
+    _pi_autosave()
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/auto_select", methods=["POST"])
+def api_pi_auto_select():
+    """
+    Lay down artificial epochs at a fixed cadence from the clicked point to the
+    right edge of the current view — PI.m's autoSelectArtificial. Pump beats are
+    metronomic, so one click plus the pump period captures them all.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    if len(state.time) == 0:
+        return jsonify({"error": "No data loaded"}), 400
+
+    body = request.get_json() or {}
+    try:
+        start = float(body["start_time"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "start_time (number) is required"}), 400
+
+    x_min = float(body.get("x_min", state.time[0]))
+    x_max = float(body.get("x_max", state.time[-1]))
+    interval = float(body.get("interval", pi_analysis.AUTO_INTERVAL_S))
+    half_width = float(body.get("half_width", pi_analysis.AUTO_HALF_WIDTH_S))
+    if interval <= 0 or half_width <= 0:
+        return jsonify({"error": "interval and half_width must be positive"}), 400
+
+    centres = pi_analysis.auto_mark_points(start, x_min, x_max, interval)
+    added = 0
+    for centre in centres:
+        t, a = pi_analysis.extract_span(state.time, state.env_u,
+                                        centre - half_width, centre + half_width)
+        if len(t) == 0:
+            continue
+        state.pi_epochs.append(
+            pi_analysis.make_epoch(state.pi_next_id, pi_analysis.ARTIFICIAL, t, a)
+        )
+        state.pi_next_id += 1
+        added += 1
+
+    if added == 0:
+        return jsonify({"error": "No epochs found — try a start point inside the data."}), 400
+
+    state.log(
+        f"PI: auto-selected {added} artificial epoch(s) every {interval}s "
+        f"(±{half_width}s) from t={start:.2f} to t={x_max:.2f}"
+    )
+    _pi_autosave()
+    return jsonify({**_pi_payload(), "added": added})
+
+
+@app.route("/api/pi/undo", methods=["POST"])
+def api_pi_undo():
+    """Remove the most recently added epoch."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    if not state.pi_epochs:
+        return jsonify({"error": "No selections to undo."}), 400
+    e = state.pi_epochs.pop()
+    state.log(f"PI: undid {e['type']} epoch #{e['id']}")
+    _pi_autosave()
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/deselect", methods=["POST"])
+def api_pi_deselect():
+    """Remove specific epochs by id (PI.m's multi-select Deselect dialog)."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "ids (non-empty list) is required"}), 400
+    try:
+        drop = {int(i) for i in ids}
+    except (TypeError, ValueError):
+        return jsonify({"error": "ids must be integers"}), 400
+
+    before = len(state.pi_epochs)
+    state.pi_epochs = [e for e in state.pi_epochs if e["id"] not in drop]
+    removed = before - len(state.pi_epochs)
+    if removed == 0:
+        return jsonify({"error": "None of those epochs exist."}), 400
+    state.log(f"PI: removed {removed} epoch(s).")
+    _pi_autosave()
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/clear", methods=["POST"])
+def api_pi_clear():
+    """
+    Drop every selection for the current speed.
+
+    Deliberately does *not* auto-save: the saved session for this speed stays
+    on disk so a mis-click here is recoverable via Load Speed.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    state.pi_epochs = []
+    state.log("PI: selections cleared (saved session left on disk).")
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/sessions")
+def api_pi_sessions():
+    """Saved per-speed selection files for the loaded recording."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    return jsonify({"sessions": pi_analysis.list_sessions(PI_SESSION_DIR, state.base_name)})
+
+
+@app.route("/api/pi/load_session", methods=["POST"])
+def api_pi_load_session():
+    """Replace the current selections with a saved speed's."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    fname = body.get("filename")
+    if not fname:
+        return jsonify({"error": "filename is required"}), 400
+    try:
+        data = pi_analysis.load_session(PI_SESSION_DIR, fname)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": f"Could not load session: {e}"}), 400
+
+    epochs = data.get("epochs", [])
+    state.pi_epochs = epochs
+    state.pi_next_id = max((e["id"] for e in epochs), default=0) + 1
+    state.pi_speed = data.get("speed", "")
+    state.pi_vessel = data.get("vessel", "") or state.pi_vessel
+    state.log(
+        f"PI: loaded session {fname} — "
+        f"{sum(1 for e in epochs if e['type'] == pi_analysis.NATIVE)} native, "
+        f"{sum(1 for e in epochs if e['type'] == pi_analysis.ARTIFICIAL)} artificial."
+    )
+    return jsonify(_pi_payload())
+
+
+@app.route("/api/pi/load_all")
+def api_pi_load_all():
+    """
+    Every saved speed at once, for the read-only overlay comparison view.
+    Does not touch the working selections.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    speeds = []
+    for meta in pi_analysis.list_sessions(PI_SESSION_DIR, state.base_name):
+        try:
+            data = pi_analysis.load_session(PI_SESSION_DIR, meta["filename"])
+        except (OSError, ValueError):
+            continue
+        speeds.append({**meta, "epochs": data.get("epochs", [])})
+    if not speeds:
+        return jsonify({"error": "No saved speed sessions found for this recording."}), 400
+    return jsonify({"speeds": speeds})
+
+
+@app.route("/api/pi/next_speed", methods=["POST"])
+def api_pi_next_speed():
+    """
+    Move on to the next pump speed: clear the working selections and adopt the
+    new speed label. Reports whether that speed already has saved selections so
+    the UI can offer to load them, as PI.m's questdlg does.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    speed = str(body.get("speed", "")).strip()
+    if not speed:
+        return jsonify({"error": "A speed label is required."}), 400
+
+    state.pi_epochs = []
+    state.pi_speed = speed
+    fname = pi_analysis.session_filename(state.base_name, speed)
+    existing = os.path.isfile(os.path.join(PI_SESSION_DIR, fname))
+    state.log(f"PI: ready for speed {speed!r}. Existing selections: {existing}")
+    return jsonify({
+        **_pi_payload(),
+        "existing_session": fname if existing else None,
+    })
+
+
+@app.route("/api/pi/export", methods=["POST"])
+def api_pi_export():
+    """
+    Append this speed's epoch metrics as one row of the "PI Demographics"
+    sheet. A prior workbook may be uploaded to append to; without one the
+    sheet is created from scratch.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    if not state.pi_epochs:
+        return jsonify({"error": "No epochs selected — nothing to export."}), 400
+
+    patient_id = (request.form.get("patient_id") or state.patient_id or "").strip()
+    speed = (request.form.get("speed") or state.pi_speed or "").strip()
+    vessel = (request.form.get("vessel") or state.pi_vessel or "").strip()
+
+    prior_path = None
+    prior_name = None
+    f = request.files.get("workbook")
+    if f and f.filename:
+        import re as _re
+        prior_name = _re.sub(r"[^\w\s.\-]", "_", f.filename)
+        prior_path = os.path.join(UPLOAD_DIR, prior_name)
+        try:
+            f.save(prior_path)
+        except Exception as e:
+            return jsonify({"error": f"Could not read the prior workbook: {e}"}), 400
+
+    row = pi_analysis.build_excel_row(state.pi_epochs, patient_id, speed, vessel)
+    stem = f"{patient_id or state.base_name or 'PI'}_PI"
+    try:
+        fname = save_pi_excel(row, EXPORT_DIR, prior_path=prior_path,
+                              prior_filename=prior_name, fallback_stem=stem)
+    except Exception as e:
+        import traceback
+        print(f"PI export error:\n{traceback.format_exc()}")
+        state.log(f"PI: export failed — {e}")
+        return jsonify({"error": f"Export failed: {e}"}), 400
+
+    summary = pi_analysis.summarize(state.pi_epochs)
+    state.log(
+        f"PI: exported {summary['n_native']} native + {summary['n_artificial']} "
+        f"artificial epoch(s) to {fname}"
+    )
+    return jsonify({"filename": fname, "summary": summary})
 
 
 # ═══════════════════════════════════════════════════════════════════════

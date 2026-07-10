@@ -188,6 +188,7 @@ class SessionState:
         self.patient_id: str = ""
         self.session: str = ""
         self.raw_path: str = ""
+        self.base_name: str = ""      # source filename without extension
 
         # raw table (list of dicts kept for master-sheet export)
         self.raw_headers: list = []
@@ -220,6 +221,13 @@ class SessionState:
         self.cvr_peak_etco2: float | None = None
         self.cvr_peak_time: float | None = None
         self.cvr_result: dict | None = None
+
+        # PI state — brushed beat epochs, in insertion order. Each carries its
+        # own id so undo/deselect never depend on list positions.
+        self.pi_epochs: list = []
+        self.pi_next_id: int = 1
+        self.pi_speed: str = ""       # "Session/Speed" field on the PI tab
+        self.pi_vessel: str = ""
 
         # unified results (per vessel)
         self.results = {
@@ -347,6 +355,7 @@ class SessionState:
 
         # auto-fill patient / session from filename
         name_only = filename.rsplit(".", 1)[0] if "." in filename else filename
+        self.base_name = name_only
         m = re.search(r"[Ll]?VAD0?(\d{2,3})", name_only)
         self.patient_id = f"VAD0{m.group(1)}" if m else "unknownPID"
         m2 = re.search(r"[Ss]ession\s*#?\s*(\d+)", name_only, re.IGNORECASE)
@@ -384,6 +393,8 @@ class SessionState:
             "marks_times":  [round(t, 4) if not np.isnan(t) else None for t in self.marks_times],
             "patient_id": self.patient_id,
             "session": self.session,
+            "base_name": self.base_name,
+            "duration_s": float(self.time[-1]) if len(self.time) else 0.0,
             "total_samples": len(self.time),
             "sample_rate": SAMPLE_RATE,
             "load_log": list(self.log_lines),
@@ -402,4 +413,35 @@ class SessionState:
             "mean_u": self._to_list(self.mean_u[mask]),
             "etco2":  self._to_list(self.etco2[mask]),
             "co2":    self._to_list(self.co2[mask]) if self.co2.size else [],
+        }
+
+    def get_pi_trace(self, start_sec: float, end_sec: float, max_points: int = 8000):
+        """
+        TCD envelope over a time span, for the PI tab's single plot.
+
+        Individual beats are ~0.5 s wide, so the operator has to see real
+        samples to brush one — the fixed 50× decimation used for the overview
+        plots would collapse a beat to a single point. Decimation here adapts
+        to the zoom level: once the visible span holds fewer than `max_points`
+        samples the trace is full-resolution, which is the regime any actual
+        selection happens in. Times keep millisecond precision (the sample
+        period is 8 ms) so beat shape survives the round-trip.
+        """
+        n_total = len(self.time)
+        if n_total == 0:
+            return {"time": [], "env_u": [], "step": 1, "full_res": True}
+
+        i0 = int(np.searchsorted(self.time, start_sec, side="left"))
+        i1 = int(np.searchsorted(self.time, end_sec, side="right"))
+        i0 = max(0, min(i0, n_total - 1))
+        i1 = max(i0 + 1, min(i1, n_total))
+
+        step = max(1, -(-(i1 - i0) // max(1, max_points)))   # ceil division
+        t = self.time[i0:i1:step]
+        e = self.env_u[i0:i1:step]
+        return {
+            "time":   [round(float(v), 3) for v in t],
+            "env_u":  [None if np.isnan(v) else round(float(v), 3) for v in e],
+            "step":   int(step),
+            "full_res": step == 1,
         }
