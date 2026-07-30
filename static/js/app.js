@@ -49,9 +49,13 @@ async function api(url, opts = {}) {
   return json;
 }
 
+// Y-zoom / X-pan buttons shared by every tab.
+const navIds = (p) => [`${p}YIn`, `${p}YOut`, `${p}YReset`, `${p}PanL`, `${p}PanR`];
+
 function enableCA(yes) {
   ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caZoomMenu', 'caZoomBtn',
-   'caBrushBtn'].forEach(id => {
+   'caBrushBtn', 'caSessLabel', 'caLoadSessBtn', 'caNextSessBtn', 'caExportAllBtn',
+   ...navIds('ca')].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -59,15 +63,18 @@ function enableCA(yes) {
 function enableCVR(yes) {
   ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrClearBtn', 'cvrCalcBtn',
    'cvrPeakBtn', 'cvrZoomMenu', 'cvrZoomBtn',
-   'cvrBrushBtn', 'cvrCo2WinBtn'].forEach(id => {
+   'cvrBrushBtn', 'cvrCo2WinBtn',
+   'cvrSessLabel', 'cvrLoadSessBtn', 'cvrNextSessBtn', 'cvrExportAllBtn',
+   ...navIds('cvr')].forEach(id => {
     $(id).disabled = !yes;
   });
 }
 
 function enablePI(yes) {
-  ['piSpeed', 'piVessel', 'piBrushBtn', 'piAutoBtn', 'piInterval', 'piHalfWidth',
+  ['piSpeed', 'piVessel', 'piBrushBtn', 'piAutoBtn',
    'piClearBtn', 'piZoomMenu', 'piZoomBtn', 'piLoadSpeedBtn', 'piLoadAllBtn',
-   'piNextSpeedBtn', 'piWorkbook', 'piExportBtn'].forEach(id => {
+   'piNextSpeedBtn', 'piWorkbook', 'piExportBtn',
+   ...navIds('pi')].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -138,6 +145,7 @@ $('fileInput').addEventListener('change', async (e) => {
     updateStatus(true);
 
     await initPITab();
+    await initCacvrSession();
 
     appendLog(`Loaded successfully — ${sessionData.total_samples} samples`);
 
@@ -552,6 +560,19 @@ $('cvrBrushBtn').addEventListener('click', () => toggleBrushMode('cvr'));
 $('caBrushClearBtn').addEventListener('click',  () => { caCharts.clearBrush(); });
 $('cvrBrushClearBtn').addEventListener('click', () => { cvrCharts.clearBrush(); });
 
+/* A deletion is on the shared server-side signal, so it already affects every
+   tab's calculations. Echo the visual gap onto the SAME signal's plot on the
+   other tabs too, so the data looks consistent everywhere at a glance. */
+function broadcastNaN(originTab, signal, rect) {
+  const controllers = { ca: caCharts, cvr: cvrCharts, pi: piChart };
+  for (const [tab, ctrl] of Object.entries(controllers)) {
+    if (tab === originTab) continue;
+    if (ctrl && typeof ctrl.applyNaNToSignal === 'function') {
+      ctrl.applyNaNToSignal(signal, rect);
+    }
+  }
+}
+
 async function applyNaN(tab) {
   const charts = (tab === 'ca') ? caCharts : cvrCharts;
   const ab = charts.activeBrush();
@@ -563,11 +584,13 @@ async function applyNaN(tab) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signal: ab.signal, ranges: [ab.rect] }),
     });
-    // Update chart locally so the user sees the gap immediately.
+    // Update this chart locally so the user sees the gap immediately, then
+    // mirror it onto the same signal on the other tabs.
     charts.applyNaNLocally();
+    broadcastNaN(tab, ab.signal, ab.rect);
     brushState[tab].hasBrush = false;
     updateBrushButtons(tab);
-    appendLog(`${tab.toUpperCase()}: Replaced ${res.changed} sample(s) in ${ab.signal} with NaN.`);
+    appendLog(`${tab.toUpperCase()}: Replaced ${res.changed} sample(s) in ${ab.signal} with NaN (applied across all tabs).`);
     toast(`Replaced ${res.changed} sample(s) with NaN`, 'success');
   } catch (err) {
     toast(err.message, 'error');
@@ -578,6 +601,24 @@ async function applyNaN(tab) {
 
 $('caNanBtn').addEventListener('click',  () => applyNaN('ca'));
 $('cvrNanBtn').addEventListener('click', () => applyNaN('cvr'));
+
+/* ═══════════════════════ NAV CONTROLS (Y-zoom + X-pan) ═══════════════════════
+   Wired identically on every tab. Y-zoom leaves X untouched; pan slides the
+   window left/right keeping its width (the zoom level). */
+const Y_ZOOM_IN = 0.8;    // shrink Y range to 80% → beats look ~25% taller
+const Y_ZOOM_OUT = 1.25;  // inverse
+const PAN_FRACTION = 0.25;
+
+function wireNavControls(prefix, controller) {
+  $(`${prefix}YIn`).addEventListener('click',  () => controller.zoomY(Y_ZOOM_IN));
+  $(`${prefix}YOut`).addEventListener('click', () => controller.zoomY(Y_ZOOM_OUT));
+  $(`${prefix}YReset`).addEventListener('click', () => controller.resetY());
+  $(`${prefix}PanL`).addEventListener('click', () => controller.panX(-PAN_FRACTION));
+  $(`${prefix}PanR`).addEventListener('click', () => controller.panX(PAN_FRACTION));
+}
+
+wireNavControls('ca', caCharts);
+wireNavControls('cvr', cvrCharts);
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -600,7 +641,7 @@ async function refreshPITrace() {
   const { min, max } = piChart.getXRange();
   try {
     const d = await api(`/api/pi/trace?start=${min}&end=${max}`);
-    piChart.setTrace(d.time, d.env_u);
+    piChart.setTrace(d.time, d.env_u, d.abp);
     $('piZoomHint').textContent = d.full_res
       ? `full resolution — ${d.time.length.toLocaleString()} samples · drag to brush`
       : `1 in ${d.step} samples shown · zoom in to brush individual beats`;
@@ -783,13 +824,8 @@ $('piPlot').addEventListener('click', async (e) => {
     const payload = await api('/api/pi/auto_select', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        start_time: startX,
-        x_min: min,
-        x_max: max,
-        interval: parseFloat($('piInterval').value) || 2,
-        half_width: parseFloat($('piHalfWidth').value) || 0.2,
-      }),
+      // Cadence (2 s) and window (−0.15 s / +0.20 s) are fixed server-side.
+      body: JSON.stringify({ start_time: startX, x_min: min, x_max: max }),
     });
     renderPI(payload);
     appendLog(`PI: Auto-selected ${payload.added} artificial epoch(s) from t=${startX.toFixed(1)} to t=${max.toFixed(1)}.`);
@@ -840,6 +876,8 @@ $('piZoomBtn').addEventListener('click', () => {
   else if (mode === 'scale30') piChart.zoomToRange(piChart.getXRange().min, 30);
   else if (mode === 'scale5') piChart.zoomToRange(piChart.getXRange().min, 300);
 });
+
+wireNavControls('pi', piChart);
 
 /* ── saved per-speed sessions ── */
 function openSpeedModal(sessions) {
@@ -977,6 +1015,200 @@ $('piNextSpeedBtn').addEventListener('click', async () => {
   }
   hideLoading();
 });
+
+
+/* ═══════════════════════════════════════════════════════════════
+   CA/CVR SESSION/SPEED — tag results, move on, export the whole
+   study once (master + per-session workbooks + JSON, zipped).
+   ═══════════════════════════════════════════════════════════════ */
+
+function syncCacvrLabels(label) {
+  if (document.activeElement !== $('caSessLabel')) $('caSessLabel').value = label;
+  if (document.activeElement !== $('cvrSessLabel')) $('cvrSessLabel').value = label;
+}
+
+async function pushCacvrLabel(label) {
+  try {
+    const r = await api('/api/cacvr/meta', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    syncCacvrLabels(r.label);
+  } catch (err) { appendLog('CA/CVR meta error: ' + err.message); }
+}
+
+function _pickVessel(map) {
+  map = map || {};
+  const v = $('vesselSelect').value;
+  if (map[v]) return [v, map[v]];
+  const k = Object.keys(map)[0];
+  return k ? [k, map[k]] : [null, null];
+}
+
+/* Populate the CA + CVR result boxes from a session summary (used after
+   loading a saved session). */
+function renderCacvrResults(summary) {
+  summary = summary || {};
+  const [cv, ca] = _pickVessel(summary.ca);
+  if (ca) {
+    const mx = ca.final_mx, mfv = ca.mean_mfv;
+    $('caResultValue').textContent = `${(mx == null || !Number.isFinite(mx)) ? '—' : mx.toFixed(4)} (${cv})`;
+    $('caMeanMfv').textContent = `${(mfv == null || !Number.isFinite(mfv)) ? '—' : mfv.toFixed(2)} (${cv})`;
+    $('caResultBox').classList.remove('hidden');
+  } else {
+    $('caResultBox').classList.add('hidden');
+  }
+  const [vv, cvr] = _pickVessel(summary.cvr);
+  if (cvr) {
+    $('cvrMCVR').textContent = (cvr.mcvr == null || !Number.isFinite(cvr.mcvr)) ? '—' : cvr.mcvr.toFixed(4);
+    $('cvrWCVR').textContent = (cvr.wcvr == null || !Number.isFinite(cvr.wcvr)) ? '—' : cvr.wcvr.toFixed(4);
+    $('cvrResultBox').classList.remove('hidden');
+  } else {
+    $('cvrResultBox').classList.add('hidden');
+  }
+}
+
+/* Redraw the shaded selection windows from a loaded session's time ranges. */
+function redrawCacvrSelections(sel) {
+  caCharts.clearSelection();
+  cvrCharts.clearOverlays();
+  if (!sel) return;
+  const box = (r) => ({ start_time: r.start, end_time: r.end });
+  if (sel.ca) caCharts.addSelection(box(sel.ca));
+  if (sel.cvr_baseline) cvrCharts.addBaseline(box(sel.cvr_baseline));
+  if (sel.cvr_hypercapnia) cvrCharts.addHypercapnia(box(sel.cvr_hypercapnia));
+  if (sel.cvr_co2_window) cvrCharts.addCo2Window(box(sel.cvr_co2_window));
+  if (sel.cvr_peak) cvrCharts.addPeakMarker(sel.cvr_peak.time, sel.cvr_peak.value);
+}
+
+async function initCacvrSession() {
+  try {
+    const st = await api('/api/cacvr/state');
+    // Default the label to the header Session on first load.
+    const label = st.label || $('sessionId').value || '';
+    syncCacvrLabels(label);
+    if (label !== st.label) await pushCacvrLabel(label);
+    renderCacvrResults(st.summary);
+    redrawCacvrSelections(st.selections);
+  } catch (err) {
+    appendLog('CA/CVR session init error: ' + err.message);
+  }
+}
+
+['caSessLabel', 'cvrSessLabel'].forEach(id => {
+  $(id).addEventListener('change', () => {
+    const label = $(id).value.trim();
+    syncCacvrLabels(label);
+    pushCacvrLabel(label);
+    appendLog(`CA/CVR: session/speed label set to "${label}".`);
+  });
+});
+
+/* ── load-session picker modal ── */
+function openCacvrModal(sessions) {
+  const list = $('cacvrSessList');
+  list.innerHTML = '';
+  sessions.forEach(s => {
+    const btn = document.createElement('button');
+    const ca = s.ca_vessels.length ? 'CA ' + s.ca_vessels.join('/') : '';
+    const cvr = s.cvr_vessels.length ? 'CVR ' + s.cvr_vessels.join('/') : '';
+    const bits = [ca, cvr].filter(Boolean).join(' · ') || 'no results';
+    btn.innerHTML = `<strong>${s.label ? 'Session ' + s.label : '(no label)'}</strong>` +
+      `<span class="speed-meta">${bits} · ${s.filename}</span>`;
+    btn.addEventListener('click', () => { closeCacvrModal(); loadCacvrSession(s.filename); });
+    list.appendChild(btn);
+  });
+  $('cacvrSessModal').classList.add('active');
+}
+function closeCacvrModal() { $('cacvrSessModal').classList.remove('active'); }
+$('cacvrSessCancel').addEventListener('click', closeCacvrModal);
+$('cacvrSessModal').addEventListener('click', (e) => {
+  if (e.target === $('cacvrSessModal')) closeCacvrModal();
+});
+
+async function loadCacvrSession(filename) {
+  showLoading();
+  try {
+    const r = await api('/api/cacvr/load_session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    });
+    syncCacvrLabels(r.label);
+    renderCacvrResults(r.summary);
+    redrawCacvrSelections(r.loaded_selections);
+    appendLog(`CA/CVR: loaded session "${r.label}".`);
+    toast('CA/CVR session loaded', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CA/CVR load error: ' + err.message);
+  }
+  hideLoading();
+}
+
+async function cacvrLoadSession() {
+  try {
+    const { sessions } = await api('/api/cacvr/sessions');
+    if (!sessions.length) { toast('No saved CA/CVR sessions yet', 'info'); return; }
+    openCacvrModal(sessions);
+  } catch (err) { toast(err.message, 'error'); }
+}
+$('caLoadSessBtn').addEventListener('click', cacvrLoadSession);
+$('cvrLoadSessBtn').addEventListener('click', cacvrLoadSession);
+
+async function cacvrNextSession() {
+  const next = prompt('Save this session/speed and start a new one.\nEnter the next session/speed label:', '');
+  if (next == null || !next.trim()) {
+    appendLog('CA/CVR: next session cancelled — nothing cleared.');
+    return;
+  }
+  showLoading();
+  try {
+    const r = await api('/api/cacvr/next_speed', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: next.trim() }),
+    });
+    // Clear the working result boxes and selection overlays for the new label.
+    syncCacvrLabels(r.label);
+    $('caResultBox').classList.add('hidden');
+    $('cvrResultBox').classList.add('hidden');
+    caCharts.clearSelection();
+    cvrCharts.clearOverlays();
+    appendLog(`CA/CVR: saved previous session; ready for "${r.label}".`);
+    if (r.existing_session &&
+        confirm(`Session "${r.label}" already has saved results. Load them?`)) {
+      await loadCacvrSession(r.existing_session);
+    } else {
+      toast(`Ready for session ${r.label}`, 'success');
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CA/CVR next-session error: ' + err.message);
+  }
+  hideLoading();
+}
+$('caNextSessBtn').addEventListener('click', cacvrNextSession);
+$('cvrNextSessBtn').addEventListener('click', cacvrNextSession);
+
+async function cacvrExportAll() {
+  showLoading();
+  try {
+    const r = await api('/api/cacvr/export_all', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const a = document.createElement('a');
+    a.href = '/api/download/' + r.filename;
+    a.download = r.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    appendLog(`CA/CVR: exported study bundle ${r.filename} (${r.n_sessions} session workbook(s) + master + JSON).`);
+    toast(`Exported ${r.n_sessions} session(s) + master + JSON`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CA/CVR export error: ' + err.message);
+  }
+  hideLoading();
+}
+$('caExportAllBtn').addEventListener('click', cacvrExportAll);
+$('cvrExportAllBtn').addEventListener('click', cacvrExportAll);
 
 
 /* ═══════════════════════ SAVE ═══════════════════════ */

@@ -16,7 +16,9 @@ const COLORS = {
   selCo2W:  '#F39C12',   // CO2 search window
   peak:     '#C0392B',
   mark:     'rgba(192, 57, 43, .55)',
-  native:     '#1E8449',
+  // Native was green; switched to blue so it is distinguishable from the red
+  // artificial highlight for a red-green colour-blind reviewer.
+  native:     '#2563EB',
   artificial: '#C0392B',
 };
 
@@ -286,6 +288,74 @@ function makeChartOptions(yLabel, annotations) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   Shared navigation helpers — Y-zoom and X-pan that leave the OTHER
+   axis untouched. Used by all three tab controllers.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Current rendered view of an axis, falling back to its configured bounds. */
+function _axisView(chart, axis) {
+  const sc = chart.scales[axis];
+  let min = sc ? sc.min : undefined;
+  let max = sc ? sc.max : undefined;
+  if (!Number.isFinite(min)) min = chart.options.scales[axis].min;
+  if (!Number.isFinite(max)) max = chart.options.scales[axis].max;
+  return { min, max };
+}
+
+/* Scale the Y range about its centre. factor < 1 zooms in (shorter range,
+   taller-looking beats), factor > 1 zooms out. X is never touched. */
+function zoomYOnChart(chart, factor) {
+  const { min, max } = _axisView(chart, 'y');
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+  const c = (min + max) / 2;
+  const half = ((max - min) / 2) * factor;
+  chart.options.scales.y.min = c - half;
+  chart.options.scales.y.max = c + half;
+  chart.update('none');
+}
+
+function resetYOnChart(chart) {
+  chart.options.scales.y.min = undefined;
+  chart.options.scales.y.max = undefined;
+  chart.update('none');
+}
+
+/* Slide the visible X window left/right by a fraction of its width, KEEPING
+   the width (so the zoom level is unchanged). Clamped to [tMin, tMax] when
+   those are known so a pan can't run off the recording. */
+function panXOnChart(chart, fraction, tMin, tMax) {
+  const { min, max } = _axisView(chart, 'x');
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+  const width = max - min;
+  let newMin = min + fraction * width;
+  let newMax = newMin + width;
+  if (Number.isFinite(tMin) && newMin < tMin) { newMin = tMin; newMax = tMin + width; }
+  if (Number.isFinite(tMax) && newMax > tMax) { newMax = tMax; newMin = tMax - width; }
+  chart.options.scales.x.min = newMin;
+  chart.options.scales.x.max = newMax;
+  chart.update('none');
+}
+
+/* Null out the primary trace's points inside `rect` if this chart is showing
+   `signal`. Returns how many points were changed. Lets a deletion made on one
+   tab be echoed onto the same signal's plot on every other tab. */
+function nullSignalOnChart(chart, signal, rect) {
+  if (!chart || !chart.$brush || chart.$brush.signal !== signal) return 0;
+  const ds = chart.data.datasets[0];
+  if (!ds || !Array.isArray(ds.data)) return 0;
+  let n = 0;
+  for (const p of ds.data) {
+    if (p && p.y != null &&
+        p.x >= rect.x_min && p.x <= rect.x_max &&
+        p.y >= rect.y_min && p.y <= rect.y_max) {
+      p.y = null; n++;
+    }
+  }
+  if (n) chart.update('none');
+  return n;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    CA Charts
    ═══════════════════════════════════════════════════════════════ */
 
@@ -329,9 +399,13 @@ class CACharts {
     attachBrush(this.chart1, 'env_u', onBrush(this.chart1));
     attachBrush(this.chart2, 'abp',   onBrush(this.chart2));
 
+    this.tMin = 0;
+    this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
     this._syncZoom();
     this.data = data;
   }
+
+  _charts() { return [this.chart1, this.chart2].filter(Boolean); }
 
   // ── brush API used by app.js ──
   setBrushMode(on) {
@@ -353,6 +427,25 @@ class CACharts {
     const ab = this.activeBrush();
     if (!ab) return 0;
     return applyNaNToChartLocally(ab.chart);
+  }
+  // Echo a deletion made on another tab onto this tab's matching signal.
+  applyNaNToSignal(signal, rect) {
+    return this._charts().reduce((n, c) => n + nullSignalOnChart(c, signal, rect), 0);
+  }
+
+  // ── Y-zoom / X-pan (leave the other axis alone) ──
+  zoomY(factor) { this._charts().forEach(c => zoomYOnChart(c, factor)); }
+  resetY()      { this._charts().forEach(resetYOnChart); }
+  panX(fraction) {
+    this._charts().forEach(c => panXOnChart(c, fraction, this.tMin, this.tMax));
+    this._syncFromChart(this.chart1);
+  }
+  _syncFromChart(src) {
+    if (!src) return;
+    const { min, max } = _axisView(src, 'x');
+    this._charts().forEach(t => {
+      t.options.scales.x.min = min; t.options.scales.x.max = max; t.update('none');
+    });
   }
 
   _syncZoom() {
@@ -522,6 +615,8 @@ class CVRCharts {
     attachBrush(this.chart3, 'etco2',  onBrush(this.chart3));
     attachBrush(this.chart4, 'co2',    onBrush(this.chart4));
 
+    this.tMin = 0;
+    this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
     this._syncZoom();
     this.data = data;
   }
@@ -543,6 +638,23 @@ class CVRCharts {
     const ab = this.activeBrush();
     if (!ab) return 0;
     return applyNaNToChartLocally(ab.chart);
+  }
+  applyNaNToSignal(signal, rect) {
+    return this._allCharts().reduce((n, c) => n + nullSignalOnChart(c, signal, rect), 0);
+  }
+
+  // ── Y-zoom / X-pan ──
+  zoomY(factor) { this._allCharts().forEach(c => zoomYOnChart(c, factor)); }
+  resetY()      { this._allCharts().forEach(resetYOnChart); }
+  panX(fraction) {
+    this._allCharts().forEach(c => panXOnChart(c, fraction, this.tMin, this.tMax));
+    const src = this.chart1;
+    if (src) {
+      const { min, max } = _axisView(src, 'x');
+      this._allCharts().forEach(t => {
+        t.options.scales.x.min = min; t.options.scales.x.max = max; t.update('none');
+      });
+    }
   }
 
   _syncZoom() {
@@ -720,18 +832,39 @@ function _epochSeries(epochs) {
   return pts;
 }
 
+/* Translucent boxes marking each epoch's time span. Used on the fiABP plot
+   (and could be used anywhere the beat line itself isn't drawn) so a selection
+   made on the TCD trace is visible on the pressure trace too. */
+function _epochBoxAnnotations(epochs, colorFor) {
+  const ann = {};
+  epochs.forEach((e) => {
+    const color = colorFor(e);
+    ann['epbox_' + e.id] = {
+      type: 'box',
+      xMin: e.t_start,
+      xMax: e.t_end,
+      backgroundColor: color + '22',
+      borderColor: color,
+      borderWidth: 1,
+      drawTime: 'beforeDatasetsDraw',
+    };
+  });
+  return ann;
+}
+
 class PIChart {
   constructor() {
-    this.chart = null;
+    this.chart = null;       // TCD envelope — brushable, carries the beat lines
+    this.abpChart = null;    // fiABP/reABP — X-synced context, epoch spans shown
     this.marksVisible = new Set();
     this.onBrushChange = () => {};
     this.onViewChange = () => {};   // fires after zoom/pan so the host refetches
+    this._syncing = false;          // guard against zoom-sync feedback loops
   }
 
   init(data) {
     this.destroy();
     this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
-    const ann = markAnnotations(data.marks_labels, data.marks_times, this.marksVisible);
 
     // Full extent of the recording. The trace is later swapped for whatever
     // slice is on screen, so the zoom limits must come from the recording
@@ -740,51 +873,84 @@ class PIChart {
     this.tMin = 0;
     this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
 
-    const options = makeChartOptions('envU (cm/s)', { ...ann });
-    // Overlay datasets are drawn from epochs sorted by start time, but two
-    // brushed beats may overlap by a sample; `normalized` promises Chart.js a
-    // strictly ascending x, so don't make that promise here.
-    options.normalized = false;
-    options.scales.x.min = this.tMin;
-    options.scales.x.max = this.tMax;
-    options.plugins.legend = {
-      display: true,
-      position: 'top',
-      align: 'end',
-      labels: {
-        boxWidth: 10, boxHeight: 10, font: { size: 10 },
-        filter: (item) => !item.text.startsWith('_'),
-      },
+    const mkOpts = (yLabel, withLegend) => {
+      const ann = markAnnotations(data.marks_labels, data.marks_times, this.marksVisible);
+      const o = makeChartOptions(yLabel, { ...ann });
+      // Two brushed beats may share a sample, so x isn't strictly ascending;
+      // don't promise Chart.js that it is.
+      o.normalized = false;
+      o.scales.x.min = this.tMin;
+      o.scales.x.max = this.tMax;
+      o.plugins.zoom.limits = { x: { min: this.tMin, max: this.tMax } };
+      if (withLegend) {
+        o.plugins.legend = {
+          display: true, position: 'top', align: 'end',
+          labels: {
+            boxWidth: 10, boxHeight: 10, font: { size: 10 },
+            filter: (item) => !item.text.startsWith('_'),
+          },
+        };
+      }
+      return o;
     };
-    options.plugins.zoom.limits = { x: { min: this.tMin, max: this.tMax } };
-    options.plugins.zoom.zoom.onZoomComplete = () => this.onViewChange();
-    options.plugins.zoom.pan.onPanComplete = () => this.onViewChange();
 
+    // ── TCD envelope (primary) ──
+    const envOpts = mkOpts('envU (cm/s)', true);
+    envOpts.plugins.zoom.zoom.onZoomComplete = () => this._afterView(this.chart);
+    envOpts.plugins.zoom.pan.onPanComplete = () => this._afterView(this.chart);
     this.chart = new Chart(document.getElementById('piPlot'), {
       type: 'line',
-      data: {
-        datasets: [{
-          label: '_trace',
-          data: xyData(data.time, data.env_u),
-          borderColor: COLORS.envU,
-        }],
-      },
-      options,
+      data: { datasets: [{ label: '_trace', data: xyData(data.time, data.env_u), borderColor: COLORS.envU }] },
+      options: envOpts,
     });
-
     attachBrush(this.chart, 'env_u', (s) => this.onBrushChange(s), { allowPan: true });
+
+    // ── fiABP / reABP (context, X-synced) ──
+    const abpEl = document.getElementById('piPlotAbp');
+    if (abpEl) {
+      const abpOpts = mkOpts('fiABP (mmHg)', false);
+      abpOpts.plugins.zoom.zoom.onZoomComplete = () => this._afterView(this.abpChart);
+      abpOpts.plugins.zoom.pan.onPanComplete = () => this._afterView(this.abpChart);
+      this.abpChart = new Chart(abpEl, {
+        type: 'line',
+        data: { datasets: [{ label: '_trace', data: xyData(data.time, data.abp || []), borderColor: COLORS.abp }] },
+        options: abpOpts,
+      });
+      // Tag with the 'abp' signal (inactive brush) so a deletion made on the
+      // CA tab's ABP plot is echoed here, but brushing stays on the TCD plot.
+      attachBrush(this.abpChart, 'abp', () => {}, { allowPan: true });
+    }
+
     this.data = data;
   }
 
-  /* Swap in a freshly-fetched (higher-resolution) trace without disturbing
-     the epoch overlays that sit above it. */
-  setTrace(time, env) {
-    if (!this.chart) return;
-    this.chart.data.datasets[0].data = xyData(time, env);
-    this.chart.update('none');
+  _allCharts() { return [this.chart, this.abpChart].filter(Boolean); }
+
+  /* One chart moved (zoom/pan/programmatic) — mirror its X to the other and
+     tell the host to refetch the trace at the new resolution. */
+  _afterView(src) {
+    if (this._syncing || !src) return;
+    this._syncing = true;
+    const { min, max } = _axisView(src, 'x');
+    this._allCharts().forEach(c => {
+      if (c !== src) {
+        c.options.scales.x.min = min;
+        c.options.scales.x.max = max;
+        c.update('none');
+      }
+    });
+    this._syncing = false;
+    this.onViewChange();
   }
 
-  /* ── brush API (mirrors CACharts / CVRCharts) ── */
+  /* Swap in a freshly-fetched (higher-resolution) trace on both plots without
+     disturbing the epoch overlays that sit above them. */
+  setTrace(time, env, abp) {
+    if (this.chart) { this.chart.data.datasets[0].data = xyData(time, env); this.chart.update('none'); }
+    if (this.abpChart) { this.abpChart.data.datasets[0].data = xyData(time, abp || []); this.abpChart.update('none'); }
+  }
+
+  /* ── brush API (mirrors CACharts / CVRCharts) — brushing is TCD-only ── */
   setBrushMode(on) { setChartBrushMode(this.chart, on); }
   activeBrush() {
     const c = this.chart;
@@ -792,6 +958,17 @@ class PIChart {
     return null;
   }
   clearBrush() { clearChartBrush(this.chart); }
+  applyNaNToSignal(signal, rect) {
+    return this._allCharts().reduce((n, c) => n + nullSignalOnChart(c, signal, rect), 0);
+  }
+
+  /* ── Y-zoom / X-pan ── */
+  zoomY(factor) { this._allCharts().forEach(c => zoomYOnChart(c, factor)); }
+  resetY()      { this._allCharts().forEach(resetYOnChart); }
+  panX(fraction) {
+    this._allCharts().forEach(c => panXOnChart(c, fraction, this.tMin, this.tMax));
+    this._afterView(this.chart);
+  }
 
   /* ── epoch overlays ── */
   setEpochs(epochs) {
@@ -806,23 +983,23 @@ class PIChart {
       this.chart.data.datasets.push({
         label,
         data: _epochSeries(items),
-        borderColor: color,
-        backgroundColor: color,
-        borderWidth: 1.8,
-        borderDash: [5, 3],
-        pointRadius: 2,
-        pointHoverRadius: 2,
-        spanGaps: false,
-        order: -1,
+        borderColor: color, backgroundColor: color,
+        borderWidth: 1.8, borderDash: [5, 3],
+        pointRadius: 2, pointHoverRadius: 2,
+        spanGaps: false, order: -1,
       });
     }
     this.chart.update('none');
+    // Mirror the selection onto the ABP plot as translucent boxes.
+    this._setAbpBoxes(epochs, (e) => e.type === 'native' ? COLORS.native : COLORS.artificial);
   }
 
   /* Read-only comparison of every saved speed, one colour each. */
   setAllSpeeds(speeds) {
     if (!this.chart) return;
     this._clearOverlays();
+    const boxEpochs = [];
+    const boxColor = {};
     speeds.forEach((sp, i) => {
       const color = SPEED_COLORS[i % SPEED_COLORS.length];
       const label = `speed_${sp.speed || '—'} (N:${sp.n_native} A:${sp.n_artificial})`;
@@ -846,8 +1023,18 @@ class PIChart {
           spanGaps: false, order: -1,
         });
       }
+      sp.epochs.forEach(e => { boxEpochs.push(e); boxColor[e.id] = color; });
     });
     this.chart.update('none');
+    this._setAbpBoxes(boxEpochs, (e) => boxColor[e.id] || COLORS.abp);
+  }
+
+  _setAbpBoxes(epochs, colorFor) {
+    if (!this.abpChart) return;
+    const ann = this.abpChart.options.plugins.annotation.annotations;
+    for (const k of Object.keys(ann)) if (k.startsWith('epbox_')) delete ann[k];
+    Object.assign(ann, _epochBoxAnnotations(epochs, colorFor));
+    this.abpChart.update('none');
   }
 
   /* Drop every epoch / all-speeds overlay, keeping the trace at index 0 and
@@ -860,16 +1047,17 @@ class PIChart {
 
   updateMarks(visibleSet) {
     this.marksVisible = visibleSet;
-    if (!this.chart) return;
-    const ann = this.chart.options.plugins.annotation.annotations;
-    for (const key in ann) {
-      if (key.startsWith('mark_')) {
-        const idx = parseInt(key.split('_')[1]);
-        ann[key].display = visibleSet.has(idx);
-        if (ann[key].label) ann[key].label.display = visibleSet.has(idx);
+    this._allCharts().forEach(chart => {
+      const ann = chart.options.plugins.annotation.annotations;
+      for (const key in ann) {
+        if (key.startsWith('mark_')) {
+          const idx = parseInt(key.split('_')[1]);
+          ann[key].display = visibleSet.has(idx);
+          if (ann[key].label) ann[key].label.display = visibleSet.has(idx);
+        }
       }
-    }
-    this.chart.update('none');
+      chart.update('none');
+    });
   }
 
   resetZoom() {
@@ -880,9 +1068,11 @@ class PIChart {
     if (!this.chart) return;
     const lo = Math.max(this.tMin, Math.min(start, this.tMax));
     const hi = Math.min(this.tMax, lo + duration);
-    this.chart.options.scales.x.min = lo;
-    this.chart.options.scales.x.max = hi > lo ? hi : this.tMax;
-    this.chart.update('none');
+    this._allCharts().forEach(c => {
+      c.options.scales.x.min = lo;
+      c.options.scales.x.max = hi > lo ? hi : this.tMax;
+      c.update('none');
+    });
     this.onViewChange();
   }
 
@@ -901,7 +1091,8 @@ class PIChart {
   }
 
   destroy() {
-    if (this.chart) { this.chart.destroy(); this.chart = null; }
+    this._allCharts().forEach(c => c.destroy());
+    this.chart = this.abpChart = null;
   }
 }
 

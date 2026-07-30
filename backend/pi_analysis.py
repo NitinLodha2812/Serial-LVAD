@@ -20,10 +20,14 @@ import re
 import numpy as np
 
 
-# Auto-select defaults, straight from PI.m: a mark every 2 s, each epoch
-# spanning ±0.2 s around the mark.
+# Auto-select artificial epochs: a mark every 2 s. The epoch window around each
+# mark is asymmetric because an artificial (pump) beat is not symmetric about
+# its peak — the deceleration limb runs ~0.15 s before the peak and the
+# acceleration limb ~0.20 s after it (0.35 s total). These are fixed by the
+# beat physiology and are intentionally NOT user-tunable.
 AUTO_INTERVAL_S = 2.0
-AUTO_HALF_WIDTH_S = 0.2
+AUTO_PRE_S = 0.15    # seconds captured BEFORE the peak (deceleration)
+AUTO_POST_S = 0.20   # seconds captured AFTER the peak (acceleration)
 
 NATIVE = "native"
 ARTIFICIAL = "artificial"

@@ -11,8 +11,9 @@ from backend.session_state import (
     window_end_for_valid_count,
 )
 from backend.calculations import compute_mx, compute_cvr
-from backend.export import save_excel, save_json, save_pi_excel
-from backend import pi_analysis
+from backend.export import save_excel, save_json, save_pi_excel, export_all_cacvr
+from backend import pi_analysis, cacvr_sessions
+from backend import export as export_backend
 
 
 def _json_safe(o):
@@ -51,9 +52,12 @@ EXPORT_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_exports")
 # PI selections auto-save here, one file per (recording, speed) — the web
 # equivalent of PI.m's `<basename>_speed<N>_selections.mat` beside the data.
 PI_SESSION_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_pi_sessions")
+# CA/CVR results auto-save here, one file per (recording, session/speed).
+CACVR_SESSION_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_cacvr_sessions")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 os.makedirs(PI_SESSION_DIR, exist_ok=True)
+os.makedirs(CACVR_SESSION_DIR, exist_ok=True)
 
 # ── global session state (single-user desktop app) ──
 state: SessionState | None = None
@@ -279,6 +283,7 @@ def api_ca_calculate():
     result["table"] = table
     state.results["CA"][vessel] = result
     state.log(f"CA: Stored CA result for {vessel} into unified sessionResults.")
+    _cacvr_autosave()
 
     return jsonify(result)
 
@@ -536,11 +541,14 @@ def api_cvr_calculate():
         state.log(f"CVR: calculation failed — {result['error']}")
         return jsonify(result), 400
 
-    state.log(f"CVR: CVR calculation complete. MCVR = {result['mcvr']}, WCVR = {result['wcvr']}")
-    # Surface the CO2 driver behind the CVR result in the activity log only
-    # (not the CVR window): delta CO2 = hypercapnia CO2 - baseline CO2, where
-    # the hypercapnia value is the detected peak ETCO2 if one was set.
-    state.log(f"CVR: Delta CO2 (hypercapnia - baseline) = {result['delta_co2']} mmHg")
+    # Surface every value that will land in the exported spreadsheet, in real
+    # time, so the operator can sanity-check the calculation the moment it runs
+    # rather than waiting for the export. Order mirrors the CVR_Summary sheet.
+    state.log("CVR: ── calculation complete — exported values ──")
+    state.log(f"CVR:   Baseline  MCBF={result['base_mcbf']}  WCBF={result['base_wcbf']}  CO2={result['base_co2']} mmHg")
+    state.log(f"CVR:   Hypercap  MCBF={result['hyp_mcbf']}  WCBF={result['hyp_wcbf']}  CO2={result['hyp_co2']} mmHg")
+    state.log(f"CVR:   Delta     ΔMCBF={result['delta_mcbf']}  ΔWCBF={result['delta_wcbf']}  ΔCO2={result['delta_co2']} mmHg")
+    state.log(f"CVR:   Result    MCVR={result['mcvr']}  WCVR={result['wcvr']}")
     state.cvr_result = result
 
     # Build export tables
@@ -564,6 +572,7 @@ def api_cvr_calculate():
 
     state.results["CVR"][vessel] = export_data
     state.log(f"CVR: Stored CVR result for {vessel} into unified sessionResults.")
+    _cacvr_autosave()
 
     return jsonify(result)
 
@@ -780,16 +789,17 @@ def api_pi_auto_select():
 
     x_min = float(body.get("x_min", state.time[0]))
     x_max = float(body.get("x_max", state.time[-1]))
-    interval = float(body.get("interval", pi_analysis.AUTO_INTERVAL_S))
-    half_width = float(body.get("half_width", pi_analysis.AUTO_HALF_WIDTH_S))
-    if interval <= 0 or half_width <= 0:
-        return jsonify({"error": "interval and half_width must be positive"}), 400
+    # Cadence and window are fixed by pump-beat physiology — see the constants
+    # in pi_analysis. They are not accepted from the request on purpose.
+    interval = pi_analysis.AUTO_INTERVAL_S
+    pre = pi_analysis.AUTO_PRE_S
+    post = pi_analysis.AUTO_POST_S
 
     centres = pi_analysis.auto_mark_points(start, x_min, x_max, interval)
     added = 0
     for centre in centres:
         t, a = pi_analysis.extract_span(state.time, state.env_u,
-                                        centre - half_width, centre + half_width)
+                                        centre - pre, centre + post)
         if len(t) == 0:
             continue
         state.pi_epochs.append(
@@ -803,7 +813,7 @@ def api_pi_auto_select():
 
     state.log(
         f"PI: auto-selected {added} artificial epoch(s) every {interval}s "
-        f"(±{half_width}s) from t={start:.2f} to t={x_max:.2f}"
+        f"(−{pre}s/+{post}s around each peak) from t={start:.2f} to t={x_max:.2f}"
     )
     _pi_autosave()
     return jsonify({**_pi_payload(), "added": added})
@@ -1013,6 +1023,210 @@ def api_log():
     if state is None:
         return jsonify({"lines": []})
     return jsonify({"lines": state.log_lines})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CA/CVR – SESSION/SPEED ACCUMULATION  (tag → move on → export once)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _cacvr_selection_ranges():
+    """Time bounds of the current CA/CVR selections, so a reloaded session can
+    redraw its shaded windows without re-storing the sample arrays."""
+    def bounds(sel):
+        if not sel or "time" not in sel or len(sel["time"]) == 0:
+            return None
+        return {"start": float(sel["time"][0]), "end": float(sel["time"][-1])}
+    ranges = {
+        "ca": bounds(state.ca_selection),
+        "cvr_baseline": bounds(state.cvr_baseline),
+        "cvr_hypercapnia": bounds(state.cvr_hypercap),
+        "cvr_co2_window": None,
+        "cvr_peak": None,
+    }
+    if state.cvr_co2_window is not None:
+        ranges["cvr_co2_window"] = {
+            "start": float(state.cvr_co2_window["start"]),
+            "end": float(state.cvr_co2_window["end"]),
+        }
+    if state.cvr_peak_etco2 is not None and state.cvr_peak_time is not None:
+        ranges["cvr_peak"] = {
+            "time": float(state.cvr_peak_time),
+            "value": float(state.cvr_peak_etco2),
+        }
+    return ranges
+
+
+def _cacvr_result_summary(results):
+    """Just the numbers the result boxes show — no big tables."""
+    ca = {}
+    cvr = {}
+    for v in ("MCA", "PCA"):
+        r = (results.get("CA") or {}).get(v)
+        if r:
+            ca[v] = {"final_mx": r.get("final_mx"), "mean_mfv": r.get("mean_mfv")}
+        c = (results.get("CVR") or {}).get(v)
+        if c:
+            s = c.get("summary") or {}
+            cvr[v] = {k: s.get(k) for k in (
+                "mcvr", "wcvr", "base_mcbf", "hyp_mcbf", "base_wcbf", "hyp_wcbf",
+                "base_co2", "hyp_co2", "delta_co2", "delta_mcbf", "delta_wcbf")}
+    return {"ca": ca, "cvr": cvr}
+
+
+def _cacvr_has_results(results=None):
+    results = results if results is not None else state.results
+    return any((results.get(a) or {}).get(v) for a in ("CA", "CVR") for v in ("MCA", "PCA"))
+
+
+def _cacvr_payload():
+    return {
+        "label": state.cacvr_speed,
+        "summary": _cacvr_result_summary(state.results),
+        "selections": _cacvr_selection_ranges(),
+        "patient_id": state.patient_id,
+        "base_name": state.base_name,
+    }
+
+
+def _cacvr_autosave():
+    """Persist the current session's CA/CVR results under the current label.
+
+    Runs after every CA/CVR calculation, so building up a study is just:
+    calculate for a label, then move on — the disk copy is always current and
+    the final Export All simply gathers them.
+    """
+    if not state.base_name or not _cacvr_has_results():
+        return None
+    payload = {
+        "base_name": state.base_name,
+        "patient_id": state.patient_id,
+        "label": state.cacvr_speed,
+        "results": export_backend.serialise(state.results),
+        "selections": _cacvr_selection_ranges(),
+    }
+    try:
+        return cacvr_sessions.save_session(
+            CACVR_SESSION_DIR, state.base_name, state.cacvr_speed, payload)
+    except Exception as e:
+        state.log(f"CA/CVR: WARNING — session auto-save failed: {e}")
+        return None
+
+
+@app.route("/api/cacvr/state")
+def api_cacvr_state():
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    return jsonify(_cacvr_payload())
+
+
+@app.route("/api/cacvr/meta", methods=["POST"])
+def api_cacvr_meta():
+    """Set the current CA/CVR session/speed label."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    if "label" in body:
+        state.cacvr_speed = str(body["label"]).strip()
+        # Re-tag any already-computed results under the new label.
+        if _cacvr_has_results():
+            _cacvr_autosave()
+    return jsonify({"ok": True, "label": state.cacvr_speed})
+
+
+@app.route("/api/cacvr/sessions")
+def api_cacvr_sessions():
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    return jsonify({"sessions": cacvr_sessions.list_sessions(CACVR_SESSION_DIR, state.base_name)})
+
+
+@app.route("/api/cacvr/next_speed", methods=["POST"])
+def api_cacvr_next_speed():
+    """
+    Finish this session/speed and start a clean one: the current results are
+    already auto-saved, so just clear the working set and adopt the new label.
+    Reports whether that label already has saved results (offer to load them).
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    label = str(body.get("label", "")).strip()
+    if not label:
+        return jsonify({"error": "A session/speed label is required."}), 400
+
+    _cacvr_autosave()   # make sure the outgoing label is persisted
+    # Clear the working results and all selections.
+    state.results = {"CA": {"MCA": None, "PCA": None}, "CVR": {"MCA": None, "PCA": None}}
+    state.ca_selection = state.ca_result = None
+    state.cvr_baseline = state.cvr_hypercap = state.cvr_co2_window = None
+    state.cvr_peak_etco2 = state.cvr_peak_time = state.cvr_result = None
+    state.cacvr_speed = label
+
+    fname = cacvr_sessions.session_filename(state.base_name, label)
+    existing = os.path.isfile(os.path.join(CACVR_SESSION_DIR, fname))
+    state.log(f"CA/CVR: ready for session/speed {label!r}. Existing results: {existing}")
+    return jsonify({**_cacvr_payload(), "existing_session": fname if existing else None})
+
+
+@app.route("/api/cacvr/load_session", methods=["POST"])
+def api_cacvr_load_session():
+    """Restore a saved session's CA/CVR results (for review or re-export)."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    fname = body.get("filename")
+    if not fname:
+        return jsonify({"error": "filename is required"}), 400
+    try:
+        data = cacvr_sessions.load_session(CACVR_SESSION_DIR, fname)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": f"Could not load session: {e}"}), 400
+
+    loaded = data.get("results") or {"CA": {"MCA": None, "PCA": None},
+                                     "CVR": {"MCA": None, "PCA": None}}
+    # Normalise shape so downstream code can assume all four slots exist.
+    for a in ("CA", "CVR"):
+        loaded.setdefault(a, {})
+        for v in ("MCA", "PCA"):
+            loaded[a].setdefault(v, None)
+    state.results = loaded
+    state.cacvr_speed = data.get("label", cacvr_sessions.label_from_filename(state.base_name, fname))
+    state.log(f"CA/CVR: loaded session {fname} (label {state.cacvr_speed!r}).")
+    return jsonify({**_cacvr_payload(), "loaded_selections": data.get("selections", {})})
+
+
+@app.route("/api/cacvr/export_all", methods=["POST"])
+def api_cacvr_export_all():
+    """
+    One-shot study export: master workbook (once) + one workbook per saved
+    session/speed + a JSON progress file, bundled into a single zip. PI is
+    exported separately and is not included here.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+
+    _cacvr_autosave()   # fold in the current working session
+    sessions = cacvr_sessions.load_all(CACVR_SESSION_DIR, state.base_name)
+    if not sessions:
+        return jsonify({"error": (
+            "No CA/CVR results saved yet. Calculate MX or CVR for at least one "
+            "session/speed first."
+        )}), 400
+
+    try:
+        zip_name, manifest = export_all_cacvr(state, sessions, EXPORT_DIR)
+    except Exception as e:
+        import traceback
+        print(f"CA/CVR export error:\n{traceback.format_exc()}")
+        state.log(f"CA/CVR: export failed — {e}")
+        return jsonify({"error": f"Export failed: {e}"}), 500
+
+    labels = [s.get("label") or "(no label)" for s in sessions]
+    state.log(
+        f"CA/CVR: exported study bundle {zip_name} — master + "
+        f"{len(sessions)} session workbook(s) ({', '.join(labels)}) + JSON."
+    )
+    return jsonify({"filename": zip_name, "manifest": manifest, "n_sessions": len(sessions)})
 
 
 # ═══════════════════════════════════════════════════════════════════════

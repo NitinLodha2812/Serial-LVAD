@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Large raw recordings / exports / saved progress (not source)
+*.txt
+*.xlsx
+*.zip
+R*_Speed*.json
+
+# MATLAB source kept out of the web app
+*.m

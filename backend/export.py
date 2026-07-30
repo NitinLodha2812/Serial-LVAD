@@ -4,7 +4,7 @@ Handles saving session data to Excel (unified workbook) and JSON (progress save)
 Mirrors the MATLAB localSave function.
 """
 
-import json, os, re
+import json, os, re, shutil, tempfile, zipfile
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -71,68 +71,166 @@ def save_json(state: SessionState, out_dir: str) -> str:
     return fname
 
 
+def _master_dataframe(state: SessionState) -> pd.DataFrame:
+    """Full raw table with the edited (NaN-brushed) columns written back.
+
+    Edits live on the shared per-signal arrays, which every tab reads and
+    writes, so a single master reflects deletions made on any plot — there is
+    no need for a per-tab or per-session master copy.
+    """
+    master_df = pd.DataFrame(state.raw_rows, columns=state.raw_headers)
+    col_positions = getattr(state, "column_positions", {}) or {}
+    sig_to_arr = {
+        "mean_u": state.mean_u, "env_u": state.env_u, "etco2": state.etco2,
+        "co2": state.co2, "abp": state.abp,
+    }
+    for signal, arr in sig_to_arr.items():
+        col_idx = col_positions.get(signal)
+        if (col_idx is not None and col_idx < len(state.raw_headers)
+                and arr is not None and len(arr) == len(master_df)):
+            master_df[state.raw_headers[col_idx]] = arr
+    return master_df
+
+
+def _write_cacvr_sheets(writer, results: dict) -> int:
+    """Write the CA/CVR result sheets for one session; return how many written."""
+    n = 0
+    ca_all = results.get("CA", {}) or {}
+    cvr_all = results.get("CVR", {}) or {}
+    for vessel in ("MCA", "PCA"):
+        ca = ca_all.get(vessel)
+        if ca and "table" in ca:
+            pd.DataFrame(ca["table"]).to_excel(writer, sheet_name=f"{vessel}_CA", index=False)
+            n += 1
+    for vessel in ("MCA", "PCA"):
+        cvr = cvr_all.get(vessel)
+        if not cvr:
+            continue
+        if "baseline" in cvr:
+            pd.DataFrame(cvr["baseline"]).to_excel(writer, sheet_name=f"{vessel}_CVR_Base", index=False); n += 1
+        if "hypercapnia" in cvr:
+            pd.DataFrame(cvr["hypercapnia"]).to_excel(writer, sheet_name=f"{vessel}_CVR_Hyp", index=False); n += 1
+        if "summary" in cvr:
+            pd.DataFrame([cvr["summary"]]).to_excel(writer, sheet_name=f"{vessel}_CVR_Summary", index=False); n += 1
+    return n
+
+
+def _write_marks_sheet(writer, state: SessionState):
+    if state.marks_labels:
+        pd.DataFrame({
+            "Time_s": state.marks_times,
+            "Label": state.marks_labels,
+        }).to_excel(writer, sheet_name="Marks", index=False)
+
+
 def save_excel(state: SessionState, out_dir: str) -> str:
     """
-    Save unified Excel workbook with sheets:
-      Master          – full raw data reflecting any NaN edits
-      MCA_CA / PCA_CA – CA results table
-      MCA_CVR_Base / MCA_CVR_Hyp / MCA_CVR_Summary (same for PCA)
-      Marks           – mark labels + times
+    Legacy single-shot unified workbook (Master + CA + CVR + Marks) for the
+    current working results. Kept for the Main-tab Save button; the accumulate-
+    then-export-all workflow lives in export_all_cacvr.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"{state.patient_id}_{state.session}_{ts}_Unified.xlsx"
     path = os.path.join(out_dir, fname)
-
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-
-        # ── Master sheet ──
         if state.raw_headers and state.raw_rows:
-            master_df = pd.DataFrame(state.raw_rows, columns=state.raw_headers)
-            # Reflect edits in the modified columns. Use the name-resolved
-            # positions captured at load time so this works regardless of the
-            # source file's column order.
-            col_positions = getattr(state, "column_positions", {}) or {}
-            sig_to_arr = {
-                "mean_u": state.mean_u,
-                "env_u":  state.env_u,
-                "etco2":  state.etco2,
-                "co2":    state.co2,
-                "abp":    state.abp,
-            }
-            for signal, arr in sig_to_arr.items():
-                col_idx = col_positions.get(signal)
-                if (col_idx is not None and col_idx < len(state.raw_headers)
-                        and arr is not None and len(arr) == len(master_df)):
-                    master_df[state.raw_headers[col_idx]] = arr
-            master_df.to_excel(writer, sheet_name="Master", index=False)
-
-        # ── CA sheets ──
-        for vessel in ("MCA", "PCA"):
-            ca = state.results["CA"].get(vessel)
-            if ca and "table" in ca:
-                df = pd.DataFrame(ca["table"])
-                df.to_excel(writer, sheet_name=f"{vessel}_CA", index=False)
-
-        # ── CVR sheets ──
-        for vessel in ("MCA", "PCA"):
-            cvr = state.results["CVR"].get(vessel)
-            if cvr:
-                if "baseline" in cvr:
-                    pd.DataFrame(cvr["baseline"]).to_excel(writer, sheet_name=f"{vessel}_CVR_Base", index=False)
-                if "hypercapnia" in cvr:
-                    pd.DataFrame(cvr["hypercapnia"]).to_excel(writer, sheet_name=f"{vessel}_CVR_Hyp", index=False)
-                if "summary" in cvr:
-                    pd.DataFrame([cvr["summary"]]).to_excel(writer, sheet_name=f"{vessel}_CVR_Summary", index=False)
-
-        # ── Marks sheet ──
-        if state.marks_labels:
-            marks_df = pd.DataFrame({
-                "Time_s": state.marks_times,
-                "Label": state.marks_labels,
-            })
-            marks_df.to_excel(writer, sheet_name="Marks", index=False)
-
+            _master_dataframe(state).to_excel(writer, sheet_name="Master", index=False)
+        _write_cacvr_sheets(writer, state.results)
+        _write_marks_sheet(writer, state)
     return fname
+
+
+def save_master_excel(state: SessionState, path: str):
+    """Master + Marks only — the study-wide raw data, written once."""
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        _master_dataframe(state).to_excel(writer, sheet_name="Master", index=False)
+        _write_marks_sheet(writer, state)
+
+
+def save_session_excel(results: dict, path: str) -> int:
+    """One session's CA + CVR sheets. Returns the sheet count (0 = nothing)."""
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        n = _write_cacvr_sheets(writer, results)
+        if n == 0:
+            # openpyxl refuses to save a book with no visible sheet — give the
+            # (shouldn't-happen) empty session a placeholder so it still opens.
+            pd.DataFrame({"note": ["no CA/CVR results in this session"]}).to_excel(
+                writer, sheet_name="empty", index=False)
+    return n
+
+
+def export_all_cacvr(state: SessionState, sessions: list, out_dir: str):
+    """
+    Bundle the whole study into one download:
+      <patient>_<ts>_Master.xlsx   — raw data + edits, ONCE
+      <patient>_<label>.xlsx       — CA+CVR sheets, one per saved session/speed
+      <patient>_<ts>_progress.json — reloadable snapshot of everything (redo net)
+    all zipped together. PI is exported separately by design.
+
+    `sessions` is the list of saved session payloads (from cacvr_sessions),
+    each a dict with "label" and serialised "results".
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    patient = _safe_stem(state.patient_id) or "patient"
+    base = f"{patient}_{ts}"
+    workdir = tempfile.mkdtemp()
+    manifest = []
+    try:
+        master_name = f"{base}_Master.xlsx"
+        save_master_excel(state, os.path.join(workdir, master_name))
+        manifest.append(master_name)
+
+        used = set()
+        for s in sessions:
+            label = _safe_stem(s.get("label")) or "session"
+            sname = f"{patient}_{label}.xlsx"
+            # Guard against two labels colliding after sanitisation.
+            i = 2
+            while sname in used:
+                sname = f"{patient}_{label}_{i}.xlsx"; i += 1
+            used.add(sname)
+            save_session_excel(s.get("results", {}), os.path.join(workdir, sname))
+            manifest.append(sname)
+
+        json_name = f"{base}_progress.json"
+        _write_progress_json(state, sessions, os.path.join(workdir, json_name))
+        manifest.append(json_name)
+
+        zip_name = f"{base}_export.zip"
+        with zipfile.ZipFile(os.path.join(out_dir, zip_name), "w", zipfile.ZIP_DEFLATED) as z:
+            for name in manifest:
+                z.write(os.path.join(workdir, name), arcname=name)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    return zip_name, manifest
+
+
+def _write_progress_json(state: SessionState, sessions: list, path: str):
+    """The redo safety-net: patient/session metadata + every saved session's
+    CA/CVR results + the current PI epochs, in one strict-JSON file."""
+    payload = {
+        "patient_id": state.patient_id,
+        "session": state.session,
+        "raw_path": state.raw_path,
+        "cacvr_sessions": {
+            (s.get("label") or "nolabel"): _serialise_dict(s.get("results", {}))
+            for s in sessions
+        },
+        "log": state.log_lines,
+    }
+    if state.pi_epochs:
+        payload["pi"] = {
+            "speed": state.pi_speed,
+            "vessel": state.pi_vessel,
+            "summary": pi_analysis.summarize(state.pi_epochs),
+            "epochs": [
+                _serialise_dict({k: v for k, v in e.items() if k not in ("time", "amp")})
+                for e in pi_analysis.numbered(state.pi_epochs)
+            ],
+        }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, default=str, allow_nan=False)
 
 
 def _safe_stem(s: str) -> str:
@@ -190,6 +288,11 @@ def save_pi_excel(row: dict, out_dir: str,
         for name, df in other_sheets.items():
             df.to_excel(writer, sheet_name=name, index=False)
     return fname
+
+
+def serialise(d):
+    """Public: JSON-safe deep copy (numpy → python, NaN/Inf → None)."""
+    return _serialise_dict(d)
 
 
 def _serialise_dict(d):

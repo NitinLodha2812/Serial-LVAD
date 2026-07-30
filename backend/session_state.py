@@ -229,6 +229,12 @@ class SessionState:
         self.pi_speed: str = ""       # "Session/Speed" field on the PI tab
         self.pi_vessel: str = ""
 
+        # CA/CVR session accumulation. Results are tagged with a session/speed
+        # label and auto-saved per label to disk, so a whole study is built up
+        # across labels and exported once at the end (one master + one workbook
+        # per label + one JSON) instead of re-writing the huge master each time.
+        self.cacvr_speed: str = ""
+
         # unified results (per vessel)
         self.results = {
             "CA":  {"MCA": None, "PCA": None},
@@ -439,9 +445,19 @@ class SessionState:
         step = max(1, -(-(i1 - i0) // max(1, max_points)))   # ceil division
         t = self.time[i0:i1:step]
         e = self.env_u[i0:i1:step]
+
+        def col(arr):
+            if arr is None or len(arr) == 0:
+                return []
+            s = arr[i0:i1:step]
+            return [None if np.isnan(v) else round(float(v), 3) for v in s]
+
         return {
             "time":   [round(float(v), 3) for v in t],
-            "env_u":  [None if np.isnan(v) else round(float(v), 3) for v in e],
+            "env_u":  col(self.env_u),
+            # fiABP/reABP alongside the envelope so the PI tab can show the
+            # arterial waveform in the same window (X-synced to the TCD plot).
+            "abp":    col(self.abp),
             "step":   int(step),
             "full_res": step == 1,
         }

@@ -4,14 +4,18 @@ A desktop-style web application for analyzing cerebral blood-flow physiology in
 LVAD (Left Ventricular Assist Device) patients. It is a Python/Flask port of the
 original MATLAB tool (`CAwindow_v10`).
 
-From a raw recording sampled at **125 Hz**, the app computes two clinical
-metrics, each for the **MCA** (middle cerebral artery) and **PCA** (posterior
-cerebral artery) vessels:
+From a raw recording sampled at **125 Hz**, the app computes clinical metrics
+for the **MCA** (middle cerebral artery) and **PCA** (posterior cerebral
+artery) vessels:
 
 - **CA / Mx index** — Cerebral Autoregulation, via the Mx correlation index.
 - **CVR** — Cerebrovascular Reactivity to CO₂ (both **MCVR** and **WCVR**).
+- **PI** — Pulsatility Index per beat epoch, for **native** (heart-driven) vs
+  **artificial** (pump-driven) beats. Ported from the separate MATLAB `PI.m`
+  epoch-selector tool.
 
-Results can be exported as a unified Excel workbook or a JSON progress file.
+Results can be exported as a unified Excel workbook or a JSON progress file;
+the PI tab writes its own `PI Demographics` spreadsheet.
 
 ---
 
@@ -172,7 +176,7 @@ timestamped **mark** and shown as a toggleable line on the plots.
 
 ## Using the app
 
-The interface has three tabs.
+The interface has four tabs.
 
 ### Main Screen
 
@@ -203,11 +207,106 @@ The interface has three tabs.
 3. (Optional) Click **Detect Peak etCO2** to find and mark the peak ETCO₂; this
    value overrides the hypercapnia mean CO₂ in the calculation.
 4. Choose the vessel, then click **Calculate CVR**. **MCVR** and **WCVR** appear
-   in the result boxes.
+   in the result boxes, and **every value that goes into the spreadsheet**
+   (baseline/hypercapnia MCBF, WCBF and CO₂, the three deltas, MCVR and WCVR) is
+   written to the Activity Log in real time so you can sanity-check the numbers
+   immediately.
 5. **Clear Selection** resets all CVR selections.
 
 Repeat the CA and CVR steps for both **MCA** and **PCA** to capture a full
 session before exporting.
+
+### CA/CVR sessions and one-shot study export
+
+CA and CVR results are **accumulated per session/speed** (the same model as the
+PI tab) so a whole study exports once at the end instead of re-writing the huge
+raw data on every save:
+
+1. Set the **Session / Speed** label (shared between the CA and CVR tabs).
+2. Compute CA and CVR for that label — results auto-save the moment they're
+   calculated.
+3. **Save & Next Session** starts a clean label (offering to reload it if it was
+   worked on before). **Load Session…** restores a saved label's results and
+   selection windows for review.
+4. When the whole study is done, **Export All Study (zip)** produces a single
+   download containing:
+   - one **`*_Master.xlsx`** — the raw data with all edits, written **once**;
+   - one **`<patient>_<label>.xlsx`** per session/speed, each with the CA and
+     CVR sheets in that one workbook;
+   - one **`*_progress.json`** — a reloadable snapshot of everything (the redo
+     safety net).
+
+Because the giant Master sheet is written a single time rather than per save,
+exporting a multi-session study is much faster. The PI tab keeps its **own**
+separate `PI Demographics` export and is not part of this bundle.
+
+**Linked deletions:** brushing a signal to NaN on any tab edits the one shared
+copy of that signal, so the deletion applies to every tab's calculations *and*
+is echoed visually onto the same signal's plot on the other tabs.
+
+### Navigating the plots (all tabs)
+
+Beyond scroll-to-zoom (X) and **Shift+drag** to pan, each tab has a control row:
+
+- **Y ＋ / Y － / Y ⟲** — zoom the Y axis in/out, or reset it, **without changing
+  the X window** (handy for making a beat taller to inspect it).
+- **◀ / ▶** — slide the visible window left/right **keeping its width** (shift
+  the zoomed-in region without zooming out and back in).
+
+On the PI tab both plots stay X-synced as you zoom or pan.
+
+### PI (Epochs) tab
+
+Selects individual beats on the TCD envelope and reports a pulsatility index
+for each. This is the Python port of the standalone MATLAB `PI.m` tool.
+
+1. Fill in **Session / Speed** and **Vessel** in the sidebar. Both are written
+   into the exported spreadsheet, and the speed also names the auto-save file.
+2. Zoom in until you can see individual beats — the zoom dropdown has
+   **Scale to 30 s**, or use the scroll wheel. The caption above the plot tells
+   you whether you are looking at full-resolution samples; you cannot brush a
+   beat accurately from a decimated view.
+3. With **Brush: ON** (the default), drag a rectangle around one beat, then
+   click **Select Native** or **Select Artificial**. Shift+drag pans instead of
+   brushing, and the scroll wheel still zooms.
+4. **Auto-Select Artificial** places an epoch every 2 s, each spanning
+   **−0.15 s before to +0.20 s after** the peak (0.35 s total — the pump beat is
+   asymmetric: ~0.15 s deceleration, ~0.20 s acceleration), marching from the
+   point you click to the right edge of the current view. These are fixed by the
+   beat physiology and are not adjustable. Pump beats are metronomic, so one
+   click captures a whole run of them.
+5. **Undo Last** drops the most recent epoch. Tick rows in the *Selected Epochs*
+   table and click **Remove Checked** to delete specific ones. **Clear All**
+   empties the working set but leaves the saved session on disk.
+6. **Export to Excel** appends one row to a `PI Demographics` sheet. Attach a
+   *prior workbook* to append to an existing sheet; leave it empty to create one.
+7. **Save & Next Speed** exports, then clears the selections and switches to a
+   new speed label — offering to reload that speed if you have worked on it
+   before.
+
+Every selection change **auto-saves** to a per-speed file, so a crash or a
+mis-click never costs a session. **Load Speed…** restores one of them;
+**Load All Speeds** overlays every saved speed at once, colour-coded, as a
+read-only comparison view.
+
+Per epoch the app reports, matching `PI.m`:
+
+| Column | Meaning |
+|--------|---------|
+| `Hi` / `Lo` / `Mean` | max, min and mean of the envelope over the epoch |
+| `PW`   | epoch duration, `t_last − t_first` (seconds) |
+| `PI`   | pulsatility index, `(Hi − Lo) / Mean` |
+
+Epochs are read from the **full-resolution** envelope regardless of the zoom
+level, and the envelope column is located by header name — so a recording whose
+`1-1 Env U` column sits somewhere other than column 5 still works.
+
+The PI tab shows the **fiABP / reABP** pressure waveform beneath the TCD trace,
+X-synced to it, with each selected beat shaded on the pressure plot too. Native
+beats are drawn in **blue** and artificial in **red** (chosen to be
+distinguishable for red-green colour-blind reviewers). **Note:** a fixed
+TCD↔pressure timing offset is not yet applied — the shaded pressure span is the
+same wall-clock window as the TCD beat, pending the agreed correction.
 
 ---
 
@@ -229,10 +328,21 @@ A single workbook with these sheets:
 ### JSON (Progress) — `*.json`
 
 A structured snapshot of patient/session metadata, all per-vessel CA/CVR results,
-and the activity log.
+the PI epoch metrics, and the activity log. Per-sample epoch waveforms are left
+out — they are recoverable from the raw recording.
 
 Files are named `{patient}_{session}_{timestamp}` and download through the browser
 automatically.
+
+### PI Demographics — `*---{timestamp}.xlsx`
+
+Written by **Export to Excel** on the PI tab, not by the Main-tab Save button.
+One row per (patient, speed, vessel), with columns `PatientID`, `SessionSpeed`,
+`Vessel`, then `NatHi_1 … NatPI_n` and `ArtHi_1 … ArtPI_n` for every selected
+epoch. Uploading a prior workbook appends to its existing sheet, padding both
+sides so old and new column sets line up; other sheets in that workbook are
+carried across. The source file is never overwritten — the timestamped copy is
+a new file.
 
 ---
 
@@ -246,15 +356,21 @@ Upenn_RA_Stroke/
 ├── backend/
 │   ├── session_state.py       # SessionState container + TXT/CSV parser
 │   ├── calculations.py        # compute_mx (CA) and compute_cvr (CVR)
-│   └── export.py              # Excel + JSON export
+│   ├── pi_analysis.py         # PI epochs, metrics, per-speed session store
+│   ├── cacvr_sessions.py      # CA/CVR per-session/speed persistence
+│   └── export.py              # Excel + JSON + PI Demographics + study bundle
 ├── templates/
-│   └── index.html             # 3-tab UI (Main / CA / CVR)
+│   └── index.html             # 4-tab UI (Main / CA / CVR / PI)
 └── static/
     ├── css/style.css          # styling
     └── js/
         ├── app.js             # UI ↔ API ↔ charts wiring
-        └── charts.js          # Chart.js wrappers (CA & CVR plots)
+        └── charts.js          # Chart.js wrappers (CA, CVR & PI plots)
 ```
+
+PI selections auto-save to your system temp directory
+(`serial_lvad_pi_sessions/`), one JSON file per recording and speed — the
+web equivalent of `PI.m`'s `<basename>_speed<N>_selections.mat`.
 
 ---
 
@@ -281,6 +397,17 @@ load, and check the browser console for blocked scripts.
 Confirm the file is comma-delimited and that the expected columns (see
 [Input data format](#input-data-format)) are present at the right positions. The
 server terminal prints a full traceback to help diagnose.
+
+**PI: "No envelope samples inside the brushed region."**
+The rectangle you dragged contains no valid envelope samples — either it sits in
+a gap you previously replaced with NaN, or its vertical extent misses the trace.
+Zoom in (the plot caption confirms when you are at full resolution) and drag a
+box that clearly encloses the beat.
+
+**PI: my brushed epoch has only one or two samples**
+You brushed while the plot was still decimated. The caption above the plot reads
+*"1 in N samples shown"* until you zoom in far enough; **Scale to 30 s** always
+gets you to full resolution.
 
 **Results look wrong / "Not enough data to compute"**
 The CA window needs enough valid (non-NaN) samples to fill at least one

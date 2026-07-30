@@ -108,12 +108,17 @@
         <button class="btn btn-sm" id="caBrushClearBtn" disabled>Clear Brush</button>
         <div class="section-divider"></div>
         <select class="btn" id="caZoomMenu" disabled>
-          <option value="zoomX">Zoom X</option>
-          <option value="zoomY">Zoom Y</option>
           <option value="home">Zoom Home</option>
           <option value="scale5">Scale to 5 min</option>
         </select>
         <button class="btn btn-sm" id="caZoomBtn" disabled>Apply Zoom</button>
+        <div class="nav-controls">
+          <button class="btn btn-sm nav-btn" id="caYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
+          <button class="btn btn-sm nav-btn" id="caYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
+          <button class="btn btn-sm nav-btn" id="caYReset" title="Reset Y axis" disabled>Y ⟲</button>
+          <button class="btn btn-sm nav-btn" id="caPanL" title="Pan left (same window width)" disabled>◀</button>
+          <button class="btn btn-sm nav-btn" id="caPanR" title="Pan right (same window width)" disabled>▶</button>
+        </div>
         <div class="section-divider"></div>
         <div class="marks-panel" id="caMarksPanel">
           <div class="marks-header">Marks</div>
@@ -131,6 +136,16 @@
             </div>
           </div>
         </div>
+
+        <!-- session/speed accumulation (shared with CVR) -->
+        <div class="section-divider"></div>
+        <div class="pi-field">
+          <label for="caSessLabel">Session / Speed</label>
+          <input type="text" id="caSessLabel" class="cacvr-sess-label" placeholder="e.g. 1" disabled>
+        </div>
+        <button class="btn cacvr-load-btn" id="caLoadSessBtn" disabled>Load Session…</button>
+        <button class="btn cacvr-next-btn" id="caNextSessBtn" disabled>Save &amp; Next Session</button>
+        <button class="btn btn-primary cacvr-export-btn" id="caExportAllBtn" disabled>Export All Study (zip)</button>
       </div>
     </div>
   </section>
@@ -170,12 +185,17 @@
         <button class="btn btn-sm" id="cvrBrushClearBtn" disabled>Clear Brush</button>
         <div class="section-divider"></div>
         <select class="btn" id="cvrZoomMenu" disabled>
-          <option value="zoomX">Zoom X</option>
-          <option value="zoomY">Zoom Y</option>
           <option value="home">Zoom Home</option>
           <option value="scale5">Scale to 5 min</option>
         </select>
         <button class="btn btn-sm" id="cvrZoomBtn" disabled>Apply Zoom</button>
+        <div class="nav-controls">
+          <button class="btn btn-sm nav-btn" id="cvrYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
+          <button class="btn btn-sm nav-btn" id="cvrYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
+          <button class="btn btn-sm nav-btn" id="cvrYReset" title="Reset Y axis" disabled>Y ⟲</button>
+          <button class="btn btn-sm nav-btn" id="cvrPanL" title="Pan left (same window width)" disabled>◀</button>
+          <button class="btn btn-sm nav-btn" id="cvrPanR" title="Pan right (same window width)" disabled>▶</button>
+        </div>
         <div class="section-divider"></div>
         <div class="marks-panel" id="cvrMarksPanel">
           <div class="marks-header">Marks</div>
@@ -193,6 +213,16 @@
             </div>
           </div>
         </div>
+
+        <!-- session/speed accumulation (shared with CA) -->
+        <div class="section-divider"></div>
+        <div class="pi-field">
+          <label for="cvrSessLabel">Session / Speed</label>
+          <input type="text" id="cvrSessLabel" class="cacvr-sess-label" placeholder="e.g. 1" disabled>
+        </div>
+        <button class="btn cacvr-load-btn" id="cvrLoadSessBtn" disabled>Load Session…</button>
+        <button class="btn cacvr-next-btn" id="cvrNextSessBtn" disabled>Save &amp; Next Session</button>
+        <button class="btn btn-primary cacvr-export-btn" id="cvrExportAllBtn" disabled>Export All Study (zip)</button>
       </div>
     </div>
   </section>
@@ -207,6 +237,14 @@
             <span class="plot-hint" id="piZoomHint">drag to brush · wheel to zoom · shift+drag to pan</span>
           </div>
           <div class="plot-wrap tall"><canvas id="piPlot"></canvas></div>
+        </div>
+        <div class="plot-card">
+          <div class="plot-title">
+            fiABP / reABP — same window
+            <span class="plot-hint">selected beats shaded · X-synced to TCD ·
+              <span class="timing-flag">timing offset TBD</span></span>
+          </div>
+          <div class="plot-wrap short"><canvas id="piPlotAbp"></canvas></div>
         </div>
         <div class="card">
           <div class="card-header"><h3>Selected Epochs</h3></div>
@@ -252,17 +290,8 @@
 
         <div class="section-divider"></div>
 
-        <div class="pi-auto-row">
-          <div class="pi-field">
-            <label for="piInterval">Interval (s)</label>
-            <input type="number" id="piInterval" value="2" min="0.05" step="0.05" disabled>
-          </div>
-          <div class="pi-field">
-            <label for="piHalfWidth">± Half-width (s)</label>
-            <input type="number" id="piHalfWidth" value="0.2" min="0.01" step="0.01" disabled>
-          </div>
-        </div>
         <button class="btn" id="piAutoBtn" disabled>Auto-Select Artificial</button>
+        <div class="epoch-note" style="text-align:center;">every 2 s · −0.15 s / +0.20 s per beat</div>
 
         <div class="section-divider"></div>
 
@@ -277,6 +306,13 @@
           <option value="scale5">Scale to 5 min</option>
         </select>
         <button class="btn btn-sm" id="piZoomBtn" disabled>Apply Zoom</button>
+        <div class="nav-controls">
+          <button class="btn btn-sm nav-btn" id="piYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
+          <button class="btn btn-sm nav-btn" id="piYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
+          <button class="btn btn-sm nav-btn" id="piYReset" title="Reset Y axis" disabled>Y ⟲</button>
+          <button class="btn btn-sm nav-btn" id="piPanL" title="Pan left (same window width)" disabled>◀</button>
+          <button class="btn btn-sm nav-btn" id="piPanR" title="Pan right (same window width)" disabled>▶</button>
+        </div>
 
         <div class="section-divider"></div>
 
@@ -324,6 +360,19 @@
       </div>
       <div class="modal-footer">
         <button class="btn btn-sm" id="piSpeedCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CA/CVR: load-session picker modal ── -->
+  <div class="modal-backdrop" id="cacvrSessModal">
+    <div class="modal">
+      <div class="modal-header">Load Saved CA/CVR Session</div>
+      <div class="modal-body">
+        <div class="speed-list" id="cacvrSessList"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" id="cacvrSessCancel">Cancel</button>
       </div>
     </div>
   </div>
