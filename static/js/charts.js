@@ -558,21 +558,21 @@ class CVRCharts {
   constructor() {
     this.chart1 = null;
     this.chart2 = null;
-    this.chart3 = null;
-    this.chart4 = null;
+    this.chart3 = null;    // CO2 waveform (was ETCO2 + CO2; ETCO2 removed)
     this.marksVisible = new Set();
     this.onBrushChange = () => {};
   }
 
-  _allCharts() {
-    return [this.chart1, this.chart2, this.chart3, this.chart4].filter(Boolean);
-  }
+  // TCD plots (meanU, envU) are where the baseline/hypercapnia windows live;
+  // the CO2 plot is decoupled and only carries the two CO2 points.
+  _allCharts() { return [this.chart1, this.chart2, this.chart3].filter(Boolean); }
+  _tcdCharts() { return [this.chart1, this.chart2].filter(Boolean); }
+  co2Chart()   { return this.chart3; }
 
   init(data) {
     this.destroy();
     const meanPts = xyData(data.time, data.mean_u);
     const envPts  = xyData(data.time, data.env_u);
-    const etPts   = xyData(data.time, data.etco2);
     const co2Pts  = xyData(data.time, data.co2 || []);
 
     this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
@@ -592,14 +592,8 @@ class CVRCharts {
 
     this.chart3 = new Chart(document.getElementById('cvrPlot3'), {
       type: 'line',
-      data: { datasets: [{ data: etPts, borderColor: COLORS.etco2, label: 'main' }] },
-      options: makeChartOptions('ETCO2', { ...ann }),
-    });
-
-    this.chart4 = new Chart(document.getElementById('cvrPlot4'), {
-      type: 'line',
       data: { datasets: [{ data: co2Pts, borderColor: COLORS.co2wave, label: 'main' }] },
-      options: makeChartOptions('CO2', { ...ann }),
+      options: makeChartOptions('CO2 (mmHg)', { ...ann }),
     });
 
     const onBrush = (active) => (s) => {
@@ -612,8 +606,7 @@ class CVRCharts {
     };
     attachBrush(this.chart1, 'mean_u', onBrush(this.chart1));
     attachBrush(this.chart2, 'env_u',  onBrush(this.chart2));
-    attachBrush(this.chart3, 'etco2',  onBrush(this.chart3));
-    attachBrush(this.chart4, 'co2',    onBrush(this.chart4));
+    attachBrush(this.chart3, 'co2',    onBrush(this.chart3));
 
     this.tMin = 0;
     this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
@@ -679,18 +672,14 @@ class CVRCharts {
     charts.forEach(c => c.update('none'));
   }
 
-  // Render baseline / hypercapnia masks as translucent annotation boxes so
-  // they shade only the time interval and don't introduce a second decimated
-  // trace on top of the underlying signal. The CVR calculation reads the
-  // full-resolution server-side selection, not these visual overlays.
+  // Baseline / hypercapnia windows shade the TCD plots ONLY. They average
+  // meanU/envU; the CO2 plot is decoupled and carries the two CO2 points
+  // instead. The calculation reads the server-side selection, not these boxes.
   addBaseline(sel)    { this._addRegion('cvr_baseline',    sel, COLORS.selBase); }
   addHypercapnia(sel) { this._addRegion('cvr_hypercapnia', sel, COLORS.selHyp); }
 
   _addRegion(annKey, sel, color) {
-    this._allCharts().forEach(chart => {
-      // Strip any legacy line-style overlay
-      const oldLabel = annKey === 'cvr_baseline' ? 'baseline' : 'hypercapnia';
-      chart.data.datasets = chart.data.datasets.filter(d => d.label !== oldLabel);
+    this._tcdCharts().forEach(chart => {
       const ann = chart.options.plugins.annotation.annotations;
       ann[annKey] = {
         type: 'box',
@@ -705,61 +694,43 @@ class CVRCharts {
     });
   }
 
-  // CO2 search window (gas-on → gas-off) — shaded across all 4 plots so the
-  // operator can see at a glance what range peak-detect will use.
-  addCo2Window(sel) {
-    this._allCharts().forEach(chart => {
-      const ann = chart.options.plugins.annotation.annotations;
-      ann.cvr_co2_window = {
-        type: 'box',
-        xMin: sel.start_time,
-        xMax: sel.end_time,
-        backgroundColor: COLORS.selCo2W + '22',
-        borderColor: COLORS.selCo2W,
-        borderWidth: 1,
-        borderDash: [5, 3],
-        drawTime: 'beforeDatasetsDraw',
-      };
-      chart.update('none');
+  // A single picked CO2 point (true end-tidal), marked on the CO2 plot only.
+  // `which` is 'baseline' or 'hypercapnia'.
+  addCo2Point(which, time, value) {
+    const c = this.co2Chart();
+    if (!c) return;
+    const label = which === 'baseline' ? 'co2_base' : 'co2_hyp';
+    const color = which === 'baseline' ? COLORS.selBase : COLORS.selHyp;
+    c.data.datasets = c.data.datasets.filter(d => d.label !== label);
+    c.data.datasets.push({
+      data: [{ x: time, y: value }],
+      borderColor: color, backgroundColor: color,
+      pointRadius: 7, pointHoverRadius: 7, pointStyle: 'rectRot',
+      showLine: false, label,
     });
-  }
-  clearCo2Window() {
-    this._allCharts().forEach(chart => {
-      const ann = chart.options.plugins.annotation.annotations;
-      delete ann.cvr_co2_window;
-      chart.update('none');
-    });
-  }
-
-  addPeakMarker(peakTime, peakVal) {
-    if (!this.chart3) return;
-    this.chart3.data.datasets = this.chart3.data.datasets.filter(d => d.label !== 'peak');
-    this.chart3.data.datasets.push({
-      data: [{ x: peakTime, y: peakVal }],
-      borderColor: COLORS.peak, backgroundColor: COLORS.peak,
-      pointRadius: 7, pointStyle: 'rectRot', showLine: false, label: 'peak',
-    });
-    this.chart3.update('none');
+    // A vertical guide line at the picked time, drawn behind the trace.
+    c.options.plugins.annotation.annotations['line_' + label] = {
+      type: 'line', xMin: time, xMax: time,
+      borderColor: color, borderWidth: 1, borderDash: [4, 3],
+      drawTime: 'beforeDatasetsDraw',
+    };
+    c.update('none');
   }
 
   clearOverlays() {
-    this._removeOverlay('baseline');
-    this._removeOverlay('hypercapnia');
-    this._removeOverlay('peak');
-    this._allCharts().forEach(c => {
+    this._tcdCharts().forEach(c => {
       const ann = c.options.plugins.annotation.annotations;
       delete ann.cvr_baseline;
       delete ann.cvr_hypercapnia;
-      delete ann.cvr_co2_window;
       c.update('none');
     });
-  }
-
-  _removeOverlay(name) {
-    this._allCharts().forEach(c => {
-      c.data.datasets = c.data.datasets.filter(d => d.label !== name);
-      c.update('none');
-    });
+    const co2 = this.co2Chart();
+    if (co2) {
+      co2.data.datasets = co2.data.datasets.filter(d => d.label !== 'co2_base' && d.label !== 'co2_hyp');
+      delete co2.options.plugins.annotation.annotations.line_co2_base;
+      delete co2.options.plugins.annotation.annotations.line_co2_hyp;
+      co2.update('none');
+    }
   }
 
   updateMarks(visibleSet) {
@@ -802,7 +773,7 @@ class CVRCharts {
 
   destroy() {
     this._allCharts().forEach(c => c.destroy());
-    this.chart1 = this.chart2 = this.chart3 = this.chart4 = null;
+    this.chart1 = this.chart2 = this.chart3 = null;
   }
 }
 

@@ -155,30 +155,32 @@
     <div class="analysis-layout">
       <div class="plots-area">
         <div class="plot-card">
-          <div class="plot-title">TCD meanU</div>
+          <div class="plot-title">TCD meanU <span class="plot-hint">baseline / hypercapnia window (averaged)</span></div>
           <div class="plot-wrap short"><canvas id="cvrPlot1"></canvas></div>
         </div>
         <div class="plot-card">
-          <div class="plot-title">TCD envU</div>
+          <div class="plot-title">TCD envU <span class="plot-hint">baseline / hypercapnia window (averaged)</span></div>
           <div class="plot-wrap short"><canvas id="cvrPlot2"></canvas></div>
         </div>
         <div class="plot-card">
-          <div class="plot-title">ETCO2</div>
+          <div class="plot-title">CO2 waveform <span class="plot-hint">click the true end-tidal CO2 point (baseline, then hypercapnia)</span></div>
           <div class="plot-wrap short"><canvas id="cvrPlot3"></canvas></div>
-        </div>
-        <div class="plot-card">
-          <div class="plot-title">CO2 waveform</div>
-          <div class="plot-wrap short"><canvas id="cvrPlot4"></canvas></div>
         </div>
       </div>
       <div class="controls-sidebar">
-        <button class="btn btn-primary" id="cvrSelectBaseBtn" disabled>Select Baseline Start</button>
-        <button class="btn btn-primary" id="cvrSelectHypBtn" disabled>Select Hypercapnia Start</button>
+        <button class="btn btn-primary" id="cvrSelectBaseBtn" disabled>Select Baseline Start (TCD)</button>
+        <button class="btn btn-primary" id="cvrSelectHypBtn" disabled>Select Hypercapnia Start (TCD)</button>
+        <div class="section-divider"></div>
+        <button class="btn btn-co2base" id="cvrCo2BaseBtn" disabled>Select CO2 Baseline Point</button>
+        <button class="btn btn-co2hyp" id="cvrCo2HypBtn" disabled>Select CO2 Hypercapnia Point</button>
+        <div class="cvr-co2-readout" id="cvrCo2Readout">
+          <span>Baseline CO2: <b id="cvrCo2BaseVal">—</b></span>
+          <span>Hypercapnia CO2: <b id="cvrCo2HypVal">—</b></span>
+          <span>Delta CO2: <b id="cvrCo2Delta">—</b></span>
+        </div>
+        <div class="section-divider"></div>
         <button class="btn btn-danger" id="cvrClearBtn" disabled>Clear Selection</button>
         <button class="btn" id="cvrCalcBtn" disabled>Calculate CVR</button>
-        <button class="btn btn-sm" id="cvrCo2WinBtn" disabled>Select CO2 Window</button>
-        <button class="btn btn-sm" id="cvrCo2WinClearBtn" disabled>Clear CO2 Window</button>
-        <button class="btn btn-sm" id="cvrPeakBtn" disabled>Detect Peak etCO2</button>
         <div class="section-divider"></div>
         <button class="btn" id="cvrBrushBtn" disabled>Brush: OFF</button>
         <button class="btn btn-danger" id="cvrNanBtn" disabled>Replace with NaN</button>

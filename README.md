@@ -200,18 +200,32 @@ The interface has four tabs.
 
 ### CVR tab
 
-1. Click **Select Baseline Start**, then click a plot to mark the baseline window
-   (~32 s / 4000 samples).
-2. Click **Select Hypercapnia Start**, then click a plot to mark the hypercapnia
-   window (~10 s / 1250 samples).
-3. (Optional) Click **Detect Peak etCO2** to find and mark the peak ETCO₂; this
-   value overrides the hypercapnia mean CO₂ in the calculation.
-4. Choose the vessel, then click **Calculate CVR**. **MCVR** and **WCVR** appear
-   in the result boxes, and **every value that goes into the spreadsheet**
-   (baseline/hypercapnia MCBF, WCBF and CO₂, the three deltas, MCVR and WCVR) is
-   written to the Activity Log in real time so you can sanity-check the numbers
-   immediately.
-5. **Clear Selection** resets all CVR selections.
+The CVR tab has three plots: **TCD meanU**, **TCD envU**, and the **CO2
+waveform**. There is no ETCO₂ plot. The device's end-tidal CO₂ channel is not
+valid for this protocol: the mask feeds CO₂-enriched room air, so the sensor
+sees the inhaled CO₂ along with the expired gas and reports a false end-tidal
+value. The true end-tidal CO₂ is therefore read off the CO₂ waveform by hand.
+
+The two selection surfaces are **decoupled**:
+
+- **TCD windows** (blood-flow averages) — click **Select Baseline Start (TCD)**
+  then a TCD plot to mark the baseline window (~32 s), and **Select Hypercapnia
+  Start (TCD)** for the hypercapnia window (~10 s). Each window averages meanU
+  (MCBF) and envU (WCBF) only. CO₂ is not averaged over these windows.
+- **CO₂ points** — click **Select CO2 Baseline Point**, then click the true
+  end-tidal point on the CO₂ waveform; then **Select CO2 Hypercapnia Point** and
+  click the hypercapnic end-tidal point. The picked values and the live
+  **ΔCO₂ = hypercapnia − baseline** appear in the sidebar readout. (If the exact
+  clicked sample was brushed out, it snaps to the nearest valid sample.)
+
+Then choose the vessel and click **Calculate CVR**:
+
+```
+MCVR = (ΔMCBF / baseline MCBF) x (100 / ΔCO2)
+WCVR = (ΔWCBF / baseline WCBF) x (100 / ΔCO2)
+```
+
+**Clear Selection** resets the TCD windows and both CO₂ points.
 
 Repeat the CA and CVR steps for both **MCA** and **PCA** to capture a full
 session before exporting.

@@ -61,9 +61,9 @@ function enableCA(yes) {
 }
 
 function enableCVR(yes) {
-  ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrClearBtn', 'cvrCalcBtn',
-   'cvrPeakBtn', 'cvrZoomMenu', 'cvrZoomBtn',
-   'cvrBrushBtn', 'cvrCo2WinBtn',
+  ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrCo2BaseBtn', 'cvrCo2HypBtn',
+   'cvrClearBtn', 'cvrCalcBtn', 'cvrZoomMenu', 'cvrZoomBtn',
+   'cvrBrushBtn',
    'cvrSessLabel', 'cvrLoadSessBtn', 'cvrNextSessBtn', 'cvrExportAllBtn',
    ...navIds('cvr')].forEach(id => {
     $(id).disabled = !yes;
@@ -315,89 +315,72 @@ $('caZoomBtn').addEventListener('click', () => {
 });
 
 
-/* ═══════════════════════ CVR — SELECT BASELINE ═══════════════════════ */
+/* ═══════════════════════ CVR — SELECTIONS ═══════════════════════
+   Two decoupled selection surfaces:
+     - TCD plots (meanU, envU): baseline / hypercapnia averaging windows.
+     - CO2 waveform plot: two manually-picked true end-tidal CO2 points. */
 
-const CVR_PLOT_IDS = ['cvrPlot1', 'cvrPlot2', 'cvrPlot3', 'cvrPlot4'];
+const CVR_TCD_IDS = ['cvrPlot1', 'cvrPlot2'];   // meanU, envU
+const CVR_CO2_ID  = 'cvrPlot3';                 // CO2 waveform
 const cvrChartFor = (id) => ({
-  cvrPlot1: cvrCharts.chart1, cvrPlot2: cvrCharts.chart2,
-  cvrPlot3: cvrCharts.chart3, cvrPlot4: cvrCharts.chart4,
+  cvrPlot1: cvrCharts.chart1, cvrPlot2: cvrCharts.chart2, cvrPlot3: cvrCharts.chart3,
 }[id]);
 
-$('cvrSelectBaseBtn').addEventListener('click', () => {
-  clickMode = 'cvr_base';
-  toast('Click on a plot to set the baseline start point', 'info');
-  appendLog('CVR: Click on plot to set baseline start.');
-  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
-});
+// Track the two CO2 point values so the readout can show delta CO2 live.
+let cvrCo2Base = null, cvrCo2Hyp = null;
 
-// Pending CO2-window start time captured between the two clicks.
-let cvrCo2WinStart = null;
+function updateCvrCo2Readout() {
+  $('cvrCo2BaseVal').textContent = cvrCo2Base == null ? '—' : cvrCo2Base.toFixed(2) + ' mmHg';
+  $('cvrCo2HypVal').textContent  = cvrCo2Hyp == null ? '—' : cvrCo2Hyp.toFixed(2) + ' mmHg';
+  $('cvrCo2Delta').textContent   =
+    (cvrCo2Base == null || cvrCo2Hyp == null) ? '—' : (cvrCo2Hyp - cvrCo2Base).toFixed(2) + ' mmHg';
+}
 
-CVR_PLOT_IDS.forEach(id => {
+function armClick(mode, ids, msg) {
+  clickMode = mode;
+  toast(msg, 'info');
+  appendLog('CVR: ' + msg);
+  ids.forEach(id => $(id).parentElement.classList.add('clickable'));
+}
+function disarmClick() {
+  clickMode = null;
+  [...CVR_TCD_IDS, CVR_CO2_ID].forEach(id => $(id).parentElement.classList.remove('clickable'));
+}
+
+$('cvrSelectBaseBtn').addEventListener('click',
+  () => armClick('cvr_base', CVR_TCD_IDS, 'Click a TCD plot to set the baseline window start'));
+$('cvrSelectHypBtn').addEventListener('click',
+  () => armClick('cvr_hyp', CVR_TCD_IDS, 'Click a TCD plot to set the hypercapnia window start'));
+$('cvrCo2BaseBtn').addEventListener('click',
+  () => armClick('cvr_co2_base', [CVR_CO2_ID], 'Click the true end-tidal CO2 point for BASELINE on the CO2 waveform'));
+$('cvrCo2HypBtn').addEventListener('click',
+  () => armClick('cvr_co2_hyp', [CVR_CO2_ID], 'Click the true end-tidal CO2 point for HYPERCAPNIA on the CO2 waveform'));
+
+// ── TCD plots: baseline / hypercapnia window selection ──
+CVR_TCD_IDS.forEach(id => {
   $(id).addEventListener('click', async (e) => {
-    if (!['cvr_base', 'cvr_hyp', 'cvr_co2win_start', 'cvr_co2win_end'].includes(clickMode)) return;
-
-    const chart = cvrChartFor(id);
-    const clickX = cvrCharts.getClickX(chart, e);
+    if (clickMode !== 'cvr_base' && clickMode !== 'cvr_hyp') return;
     const mode = clickMode;
-
-    // ── CO2 search window: two-click select (start, then end) ──
-    if (mode === 'cvr_co2win_start') {
-      cvrCo2WinStart = clickX;
-      clickMode = 'cvr_co2win_end';
-      appendLog(`CVR: CO2 window start = ${clickX.toFixed(1)} s — click again to set end.`);
-      toast('Now click the end of the CO2 window', 'info');
-      return;
-    }
-    if (mode === 'cvr_co2win_end') {
-      const start = Math.min(cvrCo2WinStart, clickX);
-      const end   = Math.max(cvrCo2WinStart, clickX);
-      cvrCo2WinStart = null;
-      clickMode = null;
-      CVR_PLOT_IDS.forEach(i => $(i).parentElement.classList.remove('clickable'));
-      showLoading();
-      try {
-        const sel = await api('/api/cvr/select_co2_window', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start_time: start, end_time: end }),
-        });
-        cvrCharts.addCo2Window(sel);
-        $('cvrCo2WinClearBtn').disabled = false;
-        appendLog(`CVR: CO2 search window set t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)} `
-                + `(${sel.n_samples} samples).`);
-        toast('CO2 search window set', 'success');
-      } catch (err) {
-        toast(err.message, 'error');
-        appendLog('CVR CO2-window error: ' + err.message);
-      }
-      hideLoading();
-      return;
-    }
-
-    clickMode = null;
-    CVR_PLOT_IDS.forEach(i => $(i).parentElement.classList.remove('clickable'));
-
+    const clickX = cvrCharts.getClickX(cvrChartFor(id), e);
+    disarmClick();
     showLoading();
     try {
       if (mode === 'cvr_base') {
         const sel = await api('/api/cvr/select_baseline', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ start_time: clickX }),
         });
         cvrCharts.addBaseline(sel);
-        appendLog(`CVR: Baseline from t=${sel.start_time.toFixed(1)} to t=${sel.end_time.toFixed(1)}`);
-        toast('Baseline selected', 'success');
+        appendLog(`CVR: Baseline window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)}`);
+        toast('Baseline window selected', 'success');
       } else {
         const sel = await api('/api/cvr/select_hypercapnia', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ start_time: clickX }),
         });
         cvrCharts.addHypercapnia(sel);
-        appendLog(`CVR: Hypercapnia from t=${sel.start_time.toFixed(1)} to t=${sel.end_time.toFixed(1)}`);
-        toast('Hypercapnia selected', 'success');
+        appendLog(`CVR: Hypercapnia window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)}`);
+        toast('Hypercapnia window selected', 'success');
       }
     } catch (err) {
       toast(err.message, 'error');
@@ -407,31 +390,28 @@ CVR_PLOT_IDS.forEach(id => {
   });
 });
 
-
-/* ═══════════════════════ CVR — SELECT HYPERCAPNIA ═══════════════════════ */
-
-$('cvrSelectHypBtn').addEventListener('click', () => {
-  clickMode = 'cvr_hyp';
-  toast('Click on a plot to set the hypercapnia start point', 'info');
-  appendLog('CVR: Click on plot to set hypercapnia start.');
-  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
-});
-
-/* ── CVR — Select CO2 Window (two-click: start then end) ── */
-$('cvrCo2WinBtn').addEventListener('click', () => {
-  clickMode = 'cvr_co2win_start';
-  cvrCo2WinStart = null;
-  toast('Click the START of the CO2 search window (gas on)', 'info');
-  appendLog('CVR: Click plot to set CO2 search window — start (gas on).');
-  CVR_PLOT_IDS.forEach(id => $(id).parentElement.classList.add('clickable'));
-});
-
-$('cvrCo2WinClearBtn').addEventListener('click', () => {
-  cvrCharts.clearCo2Window();
-  cvrCo2WinStart = null;
-  $('cvrCo2WinClearBtn').disabled = true;
-  appendLog('CVR: CO2 search window cleared (peak-detect will fall back to hypercapnia window).');
-  toast('CO2 window cleared', 'info');
+// ── CO2 waveform plot: pick the two end-tidal CO2 points ──
+$(CVR_CO2_ID).addEventListener('click', async (e) => {
+  if (clickMode !== 'cvr_co2_base' && clickMode !== 'cvr_co2_hyp') return;
+  const which = clickMode === 'cvr_co2_base' ? 'baseline' : 'hypercapnia';
+  const clickX = cvrCharts.getClickX(cvrCharts.chart3, e);
+  disarmClick();
+  showLoading();
+  try {
+    const r = await api('/api/cvr/select_co2_point', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ which, time: clickX }),
+    });
+    cvrCharts.addCo2Point(which, r.time, r.value);
+    if (which === 'baseline') cvrCo2Base = r.value; else cvrCo2Hyp = r.value;
+    updateCvrCo2Readout();
+    appendLog(`CVR: ${which} CO2 = ${r.value.toFixed(2)} mmHg at t=${r.time.toFixed(1)}`);
+    toast(`${which === 'baseline' ? 'Baseline' : 'Hypercapnia'} CO2 = ${r.value.toFixed(2)} mmHg`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CVR CO2-point error: ' + err.message);
+  }
+  hideLoading();
 });
 
 
@@ -442,25 +422,12 @@ $('cvrClearBtn').addEventListener('click', async () => {
     await api('/api/cvr/clear', { method: 'POST' });
     cvrCharts.clearOverlays();
     $('cvrResultBox').classList.add('hidden');
-    $('cvrCo2WinClearBtn').disabled = true;
+    cvrCo2Base = cvrCo2Hyp = null;
+    updateCvrCo2Readout();
+    disarmClick();
     appendLog('CVR: Selections cleared.');
     toast('Selections cleared', 'info');
   } catch (err) { toast(err.message, 'error'); }
-});
-
-
-/* ═══════════════════════ CVR — DETECT PEAK ═══════════════════════ */
-
-$('cvrPeakBtn').addEventListener('click', async () => {
-  try {
-    const result = await api('/api/cvr/detect_peak', { method: 'POST' });
-    cvrCharts.addPeakMarker(result.peak_time, result.peak_value);
-    appendLog(`CVR: Peak etCO2 = ${result.peak_value} at t=${result.peak_time}`);
-    toast(`Peak etCO2 = ${result.peak_value.toFixed(2)}`, 'success');
-  } catch (err) {
-    toast(err.message, 'error');
-    appendLog('CVR peak error: ' + err.message);
-  }
 });
 
 
@@ -506,7 +473,7 @@ $('cvrZoomBtn').addEventListener('click', () => {
    signal become NaN, preserving the time axis. */
 
 const ALL_PLOT_IDS = ['caPlot1', 'caPlot2', 'cvrPlot1', 'cvrPlot2',
-                      'cvrPlot3', 'cvrPlot4', 'piPlot'];
+                      'cvrPlot3', 'piPlot', 'piPlotAbp'];
 
 const brushState = {
   ca:  { mode: false, hasBrush: false },
@@ -1068,17 +1035,25 @@ function renderCacvrResults(summary) {
   }
 }
 
-/* Redraw the shaded selection windows from a loaded session's time ranges. */
+/* Redraw the shaded selection windows and CO2 points from a loaded session. */
 function redrawCacvrSelections(sel) {
   caCharts.clearSelection();
   cvrCharts.clearOverlays();
-  if (!sel) return;
+  cvrCo2Base = cvrCo2Hyp = null;
+  if (!sel) { updateCvrCo2Readout(); return; }
   const box = (r) => ({ start_time: r.start, end_time: r.end });
   if (sel.ca) caCharts.addSelection(box(sel.ca));
   if (sel.cvr_baseline) cvrCharts.addBaseline(box(sel.cvr_baseline));
   if (sel.cvr_hypercapnia) cvrCharts.addHypercapnia(box(sel.cvr_hypercapnia));
-  if (sel.cvr_co2_window) cvrCharts.addCo2Window(box(sel.cvr_co2_window));
-  if (sel.cvr_peak) cvrCharts.addPeakMarker(sel.cvr_peak.time, sel.cvr_peak.value);
+  if (sel.cvr_co2_baseline) {
+    cvrCharts.addCo2Point('baseline', sel.cvr_co2_baseline.time, sel.cvr_co2_baseline.value);
+    cvrCo2Base = sel.cvr_co2_baseline.value;
+  }
+  if (sel.cvr_co2_hypercapnia) {
+    cvrCharts.addCo2Point('hypercapnia', sel.cvr_co2_hypercapnia.time, sel.cvr_co2_hypercapnia.value);
+    cvrCo2Hyp = sel.cvr_co2_hypercapnia.value;
+  }
+  updateCvrCo2Readout();
 }
 
 async function initCacvrSession() {
@@ -1173,6 +1148,8 @@ async function cacvrNextSession() {
     $('cvrResultBox').classList.add('hidden');
     caCharts.clearSelection();
     cvrCharts.clearOverlays();
+    cvrCo2Base = cvrCo2Hyp = null;
+    updateCvrCo2Readout();
     appendLog(`CA/CVR: saved previous session; ready for "${r.label}".`);
     if (r.existing_session &&
         confirm(`Session "${r.label}" already has saved results. Load them?`)) {

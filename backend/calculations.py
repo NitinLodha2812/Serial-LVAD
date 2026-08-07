@@ -90,22 +90,32 @@ def compute_mx(abp: np.ndarray, env: np.ndarray):
 #  CVR – CEREBROVASCULAR REACTIVITY
 # ═══════════════════════════════════════════════════════════════════════
 
-def compute_cvr(base_mean, base_env, base_co2,
-                hyp_mean, hyp_env, hyp_co2,
-                peak_co2=None):
+def compute_cvr(base_mean, base_env,
+                hyp_mean, hyp_env,
+                base_co2, hyp_co2):
     """
     Compute CVR from baseline and hypercapnic selections.
 
-    Averages of selected windows → deltas → MCVR & WCVR
-    If peak_co2 is supplied it overrides the hypercapnic mean CO2.
+    The blood-flow terms are still window averages of the TCD signals:
+      MCBF = mean(meanU),  WCBF = mean(envU)  over each window.
+
+    The CO2 terms are single operator-picked points on the CO2 waveform, not
+    window averages. The end-tidal CO2 reported by the TCD is invalid for this
+    protocol: the mask delivers CO2-enriched room air, so the sensor sees the
+    inhaled CO2 as well as the expired gas and the device's ETCO2 detector
+    reports a false end-tidal value. The true end-tidal CO2 is therefore read
+    off the CO2 waveform by hand — one point for baseline, one for hypercapnia.
+
+      base_co2, hyp_co2 : scalar mmHg values at the two selected points
+      delta_co2         : hyp_co2 - base_co2
     """
     base_mcbf = float(np.nanmean(base_mean))
     base_wcbf = float(np.nanmean(base_env))
-    base_co2_v = float(np.nanmean(base_co2))
+    base_co2_v = float(base_co2)
 
     hyp_mcbf = float(np.nanmean(hyp_mean))
     hyp_wcbf = float(np.nanmean(hyp_env))
-    hyp_co2_v = float(peak_co2) if peak_co2 is not None else float(np.nanmean(hyp_co2))
+    hyp_co2_v = float(hyp_co2)
 
     delta_mcbf = hyp_mcbf - base_mcbf
     delta_wcbf = hyp_wcbf - base_wcbf

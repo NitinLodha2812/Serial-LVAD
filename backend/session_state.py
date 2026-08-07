@@ -213,13 +213,14 @@ class SessionState:
         self.ca_selection: dict | None = None   # {time, abp, env}
         self.ca_result: dict | None = None      # {MAP, MFV, corr, finalMX, table}
 
-        # CVR state
-        self.cvr_baseline: dict | None = None   # {time, mean, env, co2}
-        self.cvr_hypercap: dict | None = None   # {time, mean, env, co2}
-        self.cvr_co2_window: dict | None = None # {start, end} — search window
-                                                # for peak ETCO2 (gas-on → gas-off)
-        self.cvr_peak_etco2: float | None = None
-        self.cvr_peak_time: float | None = None
+        # CVR state. Baseline/hypercapnia windows now cover the TCD signals
+        # (meanU/envU) only — CO2 is no longer averaged over a window.
+        self.cvr_baseline: dict | None = None   # {time, mean, env}
+        self.cvr_hypercap: dict | None = None   # {time, mean, env}
+        # True end-tidal CO2 is picked by hand off the CO2 waveform: one point
+        # for baseline, one for hypercapnia. Each is {"time": s, "value": mmHg}.
+        self.cvr_co2_baseline: dict | None = None
+        self.cvr_co2_hypercap: dict | None = None
         self.cvr_result: dict | None = None
 
         # PI state — brushed beat epochs, in insertion order. Each carries its

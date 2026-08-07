@@ -628,6 +628,37 @@ body { padding-bottom: 40px; }
   font-size: .78rem;
 }
 
+/* CVR: CO2 point buttons + live readout */
+.btn-co2base:not(:disabled) {
+  background: var(--select-base);
+  border-color: var(--select-base);
+  color: #fff;
+  font-weight: 600;
+}
+.btn-co2hyp:not(:disabled) {
+  background: var(--select-hyp);
+  border-color: var(--select-hyp);
+  color: #fff;
+  font-weight: 600;
+}
+.cvr-co2-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: .78rem;
+  color: var(--text-muted);
+}
+.cvr-co2-readout b {
+  color: var(--text);
+  font-family: var(--font-mono);
+  float: right;
+}
+
 /* fiABP timing caveat flag on the PI tab */
 .timing-flag {
   color: var(--warn);

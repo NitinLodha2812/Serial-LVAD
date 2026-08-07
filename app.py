@@ -302,9 +302,10 @@ def api_cvr_select_baseline():
     idx = int(np.searchsorted(state.time, start_time))
 
     # Extend the baseline window past removed/NaN samples so it still spans
-    # BASELINE_SAMPLES of valid data. A sample is valid only when meanU, envU
-    # and ETCO2 are all present, since the CVR baseline averages all three.
-    base_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u) & ~np.isnan(state.etco2)
+    # BASELINE_SAMPLES of valid data. The window covers the TCD signals only
+    # (meanU/envU) — CO2 is no longer averaged over a window, so it plays no
+    # part in the validity test.
+    base_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u)
     idx_end, n_valid, exhausted = window_end_for_valid_count(
         base_valid, idx, BASELINE_SAMPLES
     )
@@ -325,15 +326,11 @@ def api_cvr_select_baseline():
     sel_time = state.time[inds].copy()
     sel_mean = state.mean_u[inds].copy()
     sel_env  = state.env_u[inds].copy()
-    sel_co2  = state.etco2[inds].copy()
 
-    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env) & np.isnan(sel_co2)):
-        return jsonify({"error": "Baseline selection contains no valid data."}), 400
+    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env)):
+        return jsonify({"error": "Baseline selection contains no valid TCD data."}), 400
 
-    state.cvr_baseline = {
-        "time": sel_time, "mean": sel_mean,
-        "env": sel_env, "co2": sel_co2,
-    }
+    state.cvr_baseline = {"time": sel_time, "mean": sel_mean, "env": sel_env}
     state.log(
         f"CVR: baseline start t={state.time[idx]:.2f} "
         f"({len(sel_time)} samples)"
@@ -360,8 +357,8 @@ def api_cvr_select_hypercapnia():
     idx = int(np.searchsorted(state.time, start_time))
 
     # Extend the hypercapnia window past removed/NaN samples so it still spans
-    # HYPERCAP_SAMPLES of valid data (meanU, envU and ETCO2 all present).
-    hyp_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u) & ~np.isnan(state.etco2)
+    # HYPERCAP_SAMPLES of valid TCD data (meanU/envU). CO2 is not averaged here.
+    hyp_valid = ~np.isnan(state.mean_u) & ~np.isnan(state.env_u)
     idx_end, n_valid, exhausted = window_end_for_valid_count(
         hyp_valid, idx, HYPERCAP_SAMPLES
     )
@@ -381,15 +378,11 @@ def api_cvr_select_hypercapnia():
     sel_time = state.time[inds].copy()
     sel_mean = state.mean_u[inds].copy()
     sel_env  = state.env_u[inds].copy()
-    sel_co2  = state.etco2[inds].copy()
 
-    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env) & np.isnan(sel_co2)):
-        return jsonify({"error": "Hypercapnia selection contains no valid data."}), 400
+    if len(sel_time) == 0 or np.all(np.isnan(sel_mean) & np.isnan(sel_env)):
+        return jsonify({"error": "Hypercapnia selection contains no valid TCD data."}), 400
 
-    state.cvr_hypercap = {
-        "time": sel_time, "mean": sel_mean,
-        "env": sel_env, "co2": sel_co2,
-    }
+    state.cvr_hypercap = {"time": sel_time, "mean": sel_mean, "env": sel_env}
     state.log(
         f"CVR: hypercapnia start t={state.time[idx]:.2f} "
         f"({len(sel_time)} samples)"
@@ -403,99 +396,58 @@ def api_cvr_select_hypercapnia():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CVR – SELECT CO2 SEARCH WINDOW (gas-on → gas-off)
+#  CVR – SELECT A CO2 POINT (true end-tidal CO2, picked off the waveform)
 # ═══════════════════════════════════════════════════════════════════════
 
-@app.route("/api/cvr/select_co2_window", methods=["POST"])
-def api_cvr_select_co2_window():
+@app.route("/api/cvr/select_co2_point", methods=["POST"])
+def api_cvr_select_co2_point():
     """
-    Define an explicit time range for peak-ETCO2 detection. This is broader
-    than the (~10 s) hypercapnia selection and typically spans gas-on to
-    gas-off, so the search captures the true ETCO2 peak even when the
-    brain-response window lags the inhaled-CO2 rise.
+    Record the true end-tidal CO2 for baseline or hypercapnia as a single
+    operator-picked point on the CO2 waveform.
+
+    The device's ETCO2 channel is invalid for this protocol (the mask feeds
+    CO2-enriched air, so the sensor mixes inhaled and expired CO2), so the
+    operator reads the real end-tidal value off the CO2 waveform by eye and
+    clicks it. We take the CO2 sample nearest the clicked time; if that exact
+    sample was brushed out (NaN), we snap to the nearest valid sample.
+
+    Body: { "which": "baseline" | "hypercapnia", "time": <seconds> }
     """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
 
     body = request.get_json() or {}
+    which = str(body.get("which", "")).lower()
+    if which not in ("baseline", "hypercapnia"):
+        return jsonify({"error": "which must be 'baseline' or 'hypercapnia'"}), 400
     try:
-        start = float(body["start_time"])
-        end   = float(body["end_time"])
+        t_click = float(body["time"])
     except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "start_time and end_time (numbers) are required."}), 400
-    if end < start:
-        start, end = end, start
-    if end <= start:
-        return jsonify({"error": "CO2 window must have non-zero width."}), 400
+        return jsonify({"error": "time (number) is required"}), 400
 
-    # Snap to actual sample indices on the time axis
-    i0 = int(np.searchsorted(state.time, start))
-    i1 = int(np.searchsorted(state.time, end))
-    i0 = max(0, min(i0, len(state.time) - 1))
-    i1 = max(0, min(i1, len(state.time) - 1))
-    if i1 <= i0:
-        return jsonify({"error": "CO2 window snapped to zero samples."}), 400
+    if state.co2 is None or state.co2.size == 0 or np.all(np.isnan(state.co2)):
+        return jsonify({"error": "No CO2 waveform is available in this recording."}), 400
 
-    t0 = float(state.time[i0])
-    t1 = float(state.time[i1])
-    state.cvr_co2_window = {
-        "start": t0, "end": t1,
-        "i_start": i0, "i_end": i1,
-    }
-    state.log(
-        f"CVR: CO2 search window set t={t0:.2f}..{t1:.2f} "
-        f"({i1 - i0 + 1} samples)"
-    )
-    return jsonify({"start_time": t0, "end_time": t1, "n_samples": i1 - i0 + 1})
+    idx = int(np.searchsorted(state.time, t_click))
+    idx = max(0, min(idx, len(state.time) - 1))
 
+    # Snap to the nearest valid CO2 sample if the clicked one was removed.
+    if np.isnan(state.co2[idx]):
+        valid = np.where(~np.isnan(state.co2))[0]
+        if valid.size == 0:
+            return jsonify({"error": "CO2 waveform has no valid samples."}), 400
+        idx = int(valid[np.argmin(np.abs(valid - idx))])
 
-# ═══════════════════════════════════════════════════════════════════════
-#  CVR – DETECT PEAK ETCO2
-# ═══════════════════════════════════════════════════════════════════════
-
-@app.route("/api/cvr/detect_peak", methods=["POST"])
-def api_cvr_detect_peak():
-    """
-    Find the highest ETCO2 sample. Search range, in priority order:
-      1. The user-selected CO2 window (set via /api/cvr/select_co2_window) —
-         this is the gas-on → gas-off range and is the physiologically
-         correct place to look for the peak.
-      2. Falls back to the hypercapnia selection if no CO2 window is set,
-         preserving the old behaviour.
-    """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-
-    source = None
-    if state.cvr_co2_window is not None:
-        i0 = state.cvr_co2_window["i_start"]
-        i1 = state.cvr_co2_window["i_end"] + 1
-        co2 = state.etco2[i0:i1]
-        t   = state.time[i0:i1]
-        source = "CO2 window"
-    elif state.cvr_hypercap is not None:
-        co2 = state.cvr_hypercap["co2"]
-        t   = state.cvr_hypercap["time"]
-        source = "hypercapnia window (fallback — set a CO2 window for the full gas-on→off range)"
+    value = float(state.co2[idx])
+    t_snap = float(state.time[idx])
+    point = {"time": t_snap, "value": value}
+    if which == "baseline":
+        state.cvr_co2_baseline = point
     else:
-        return jsonify({"error": "Set a CO2 window (or a hypercapnia selection) before detecting peak etCO2."}), 400
+        state.cvr_co2_hypercap = point
+    state.log(f"CVR: {which} CO2 point = {value:.2f} mmHg at t={t_snap:.2f}")
 
-    if np.all(np.isnan(co2)):
-        return jsonify({"error": "ETCO2 has no valid samples in the selected range."}), 400
-
-    idx = int(np.nanargmax(co2))
-    val = float(co2[idx])
-    peak_time = float(t[idx])
-
-    state.cvr_peak_etco2 = val
-    state.cvr_peak_time  = peak_time
-    state.log(f"CVR: peak etCO2 = {val:.2f} at t={peak_time:.2f} (source: {source})")
-
-    return jsonify({
-        "peak_value": round(val, 4),
-        "peak_time":  round(peak_time, 4),
-        "source": source,
-    })
+    return jsonify({"which": which, "time": round(t_snap, 4), "value": round(value, 4)})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -508,9 +460,8 @@ def api_cvr_clear():
         return jsonify({"error": "No data loaded"}), 400
     state.cvr_baseline = None
     state.cvr_hypercap = None
-    state.cvr_co2_window = None
-    state.cvr_peak_etco2 = None
-    state.cvr_peak_time = None
+    state.cvr_co2_baseline = None
+    state.cvr_co2_hypercap = None
     state.cvr_result = None
     state.log("CVR: selections cleared.")
     return jsonify({"ok": True})
@@ -525,33 +476,35 @@ def api_cvr_calculate():
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
     if state.cvr_baseline is None or state.cvr_hypercap is None:
-        return jsonify({"error": "Both baseline and hypercapnia selections are required."}), 400
+        return jsonify({"error": "Both baseline and hypercapnia TCD selections are required."}), 400
+    if state.cvr_co2_baseline is None or state.cvr_co2_hypercap is None:
+        return jsonify({"error": "Select a baseline and a hypercapnia CO2 point on the CO2 waveform first."}), 400
 
     body = request.get_json() or {}
     vessel = body.get("vessel", "MCA")
 
     state.log("CVR: Beginning CVR calculation...")
     result = compute_cvr(
-        state.cvr_baseline["mean"], state.cvr_baseline["env"], state.cvr_baseline["co2"],
-        state.cvr_hypercap["mean"], state.cvr_hypercap["env"], state.cvr_hypercap["co2"],
-        peak_co2=state.cvr_peak_etco2,
+        state.cvr_baseline["mean"], state.cvr_baseline["env"],
+        state.cvr_hypercap["mean"], state.cvr_hypercap["env"],
+        state.cvr_co2_baseline["value"], state.cvr_co2_hypercap["value"],
     )
 
     if "error" in result:
         state.log(f"CVR: calculation failed — {result['error']}")
         return jsonify(result), 400
 
-    # Surface every value that will land in the exported spreadsheet, in real
-    # time, so the operator can sanity-check the calculation the moment it runs
-    # rather than waiting for the export. Order mirrors the CVR_Summary sheet.
-    state.log("CVR: ── calculation complete — exported values ──")
-    state.log(f"CVR:   Baseline  MCBF={result['base_mcbf']}  WCBF={result['base_wcbf']}  CO2={result['base_co2']} mmHg")
-    state.log(f"CVR:   Hypercap  MCBF={result['hyp_mcbf']}  WCBF={result['hyp_wcbf']}  CO2={result['hyp_co2']} mmHg")
-    state.log(f"CVR:   Delta     ΔMCBF={result['delta_mcbf']}  ΔWCBF={result['delta_wcbf']}  ΔCO2={result['delta_co2']} mmHg")
-    state.log(f"CVR:   Result    MCVR={result['mcvr']}  WCVR={result['wcvr']}")
+    state.log(f"CVR: CVR calculation complete. MCVR = {result['mcvr']}, WCVR = {result['wcvr']}")
+    state.log(
+        f"CVR: Delta CO2 (hypercapnia - baseline) = {result['delta_co2']} mmHg "
+        f"(baseline={result['base_co2']}, hypercapnia={result['hyp_co2']})"
+    )
+    result["base_co2_time"] = round(state.cvr_co2_baseline["time"], 4)
+    result["hyp_co2_time"] = round(state.cvr_co2_hypercap["time"], 4)
     state.cvr_result = result
 
-    # Build export tables
+    # Build export tables. The TCD windows carry meanU/envU only; the CO2
+    # numbers are the two picked points, recorded in the summary.
     base_n = len(state.cvr_baseline["mean"])
     hyp_n = len(state.cvr_hypercap["mean"])
     export_data = {
@@ -559,13 +512,11 @@ def api_cvr_calculate():
             "Time_s": (np.arange(base_n) / SAMPLE_RATE).tolist(),
             "meanU": state.cvr_baseline["mean"].tolist(),
             "envU": state.cvr_baseline["env"].tolist(),
-            "etco2": state.cvr_baseline["co2"].tolist(),
         },
         "hypercapnia": {
             "Time_s": (np.arange(hyp_n) / SAMPLE_RATE).tolist(),
             "meanU": state.cvr_hypercap["mean"].tolist(),
             "envU": state.cvr_hypercap["env"].tolist(),
-            "etco2": state.cvr_hypercap["co2"].tolist(),
         },
         "summary": result,
     }
@@ -1040,19 +991,9 @@ def _cacvr_selection_ranges():
         "ca": bounds(state.ca_selection),
         "cvr_baseline": bounds(state.cvr_baseline),
         "cvr_hypercapnia": bounds(state.cvr_hypercap),
-        "cvr_co2_window": None,
-        "cvr_peak": None,
+        "cvr_co2_baseline": state.cvr_co2_baseline,
+        "cvr_co2_hypercapnia": state.cvr_co2_hypercap,
     }
-    if state.cvr_co2_window is not None:
-        ranges["cvr_co2_window"] = {
-            "start": float(state.cvr_co2_window["start"]),
-            "end": float(state.cvr_co2_window["end"]),
-        }
-    if state.cvr_peak_etco2 is not None and state.cvr_peak_time is not None:
-        ranges["cvr_peak"] = {
-            "time": float(state.cvr_peak_time),
-            "value": float(state.cvr_peak_etco2),
-        }
     return ranges
 
 
