@@ -27,32 +27,41 @@ def _nan_safe(v):
     return v
 
 
-def save_json(state: SessionState, out_dir: str) -> str:
-    """Save progress as JSON (re-loadable)."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"{state.patient_id}_{state.session}_{ts}.json"
-    path = os.path.join(out_dir, fname)
+PROGRESS_FORMAT = "lvad_progress"
+PROGRESS_VERSION = 2
 
+
+def build_progress_payload(state: SessionState, sessions: list) -> dict:
+    """
+    The reloadable progress snapshot: study mode + identity + every saved
+    CA/CVR session (results and selection ranges) + the current PI epochs.
+
+    `sessions` is the list of per-label session payloads from cacvr_sessions
+    (each a dict with "label", "results", "selections"). Kept as a list so
+    RAMPs speeds and Serial LVAD vessels both round-trip cleanly.
+    """
     payload = {
+        "format": PROGRESS_FORMAT,
+        "version": PROGRESS_VERSION,
+        "study_mode": state.study_mode,
         "patient_id": state.patient_id,
         "session": state.session,
+        "base_name": state.base_name,
         "raw_path": state.raw_path,
-        "results": {},
+        "cacvr_sessions": [
+            {
+                "label": s.get("label") or "",
+                "results": _serialise_dict(s.get("results", {})),
+                "selections": _serialise_dict(s.get("selections", {})),
+            }
+            for s in sessions
+        ],
         "log": state.log_lines,
     }
-
-    for analysis in ("CA", "CVR"):
-        payload["results"][analysis] = {}
-        for vessel in ("MCA", "PCA"):
-            r = state.results[analysis][vessel]
-            if r is not None:
-                payload["results"][analysis][vessel] = _serialise_dict(r)
-
-    # PI epochs: metrics and time bounds only. The per-sample waveform stays
-    # out of the progress file — it is recoverable from the raw recording, and
-    # a few hundred epochs of it would dwarf everything else here.
+    # PI metrics only (per-sample waveform stays out — recoverable from the raw
+    # recording, and would dwarf everything else here).
     if state.pi_epochs:
-        payload["results"]["PI"] = {
+        payload["pi"] = {
             "speed": state.pi_speed,
             "vessel": state.pi_vessel,
             "summary": pi_analysis.summarize(state.pi_epochs),
@@ -61,14 +70,77 @@ def save_json(state: SessionState, out_dir: str) -> str:
                 for e in pi_analysis.numbered(state.pi_epochs)
             ],
         }
+    return payload
 
-    # allow_nan=False is a tripwire: the payload is already NaN-scrubbed by
-    # _serialise_dict, so this should never fire — but if a NaN ever slips
-    # through we want a loud failure (caught by the save route) rather than a
-    # silently invalid file that browsers and other tools refuse to parse.
+
+def save_progress_json(state: SessionState, sessions: list, out_dir: str) -> str:
+    """Write the standalone progress JSON (the file 'Load Progress' reopens)."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"{_safe_stem(state.patient_id)}_{_safe_stem(state.session)}_{ts}_progress.json"
+    path = os.path.join(out_dir, fname)
+    payload = build_progress_payload(state, sessions)
+    # allow_nan=False is a tripwire: the payload is already NaN-scrubbed, so
+    # this should never fire — but a stray NaN must fail loudly rather than
+    # write a file no strict parser can reopen.
     with open(path, "w") as f:
         json.dump(payload, f, indent=2, default=str, allow_nan=False)
     return fname
+
+
+def parse_progress_payload(data: dict) -> dict:
+    """
+    Normalise any progress-JSON schema we have written into:
+        {study_mode, patient_id, session, base_name, sessions, pi}
+    where `sessions` is [{label, results, selections}].
+
+    Tolerates three shapes: the current list form, an older
+    ``cacvr_sessions: {label: results}`` dict, and the original single-session
+    ``results: {CA/CVR: {vessel: ...}}`` snapshot.
+    """
+    patient_id = data.get("patient_id", "") or ""
+    session = data.get("session", "") or ""
+    study_mode = data.get("study_mode") or "serial_lvad"
+    base_name = data.get("base_name") or ""
+    if not base_name:
+        raw = data.get("raw_path") or ""
+        stem = os.path.splitext(os.path.basename(raw))[0] if raw else ""
+        base_name = stem or f"{patient_id}_{session}".strip("_") or "reopened"
+
+    sessions = []
+    cs = data.get("cacvr_sessions")
+    if isinstance(cs, list):
+        for s in cs:
+            sessions.append({
+                "label": s.get("label", ""),
+                "results": s.get("results", {}) or {},
+                "selections": s.get("selections", {}) or {},
+            })
+    elif isinstance(cs, dict):
+        for label, results in cs.items():
+            sessions.append({
+                "label": "" if label == "nolabel" else label,
+                "results": results or {},
+                "selections": {},
+            })
+    elif isinstance(data.get("results"), dict):
+        # Original single-session snapshot. PI (if present) is pulled out
+        # separately below, so exclude it from the CA/CVR results here.
+        res = {k: v for k, v in data["results"].items() if k in ("CA", "CVR")}
+        if any((res.get(a) or {}).get(v) for a in ("CA", "CVR") for v in ("MCA", "PCA")):
+            sessions.append({"label": session, "results": res, "selections": {}})
+
+    pi = data.get("pi")
+    if pi is None and isinstance(data.get("results"), dict):
+        pi = data["results"].get("PI")
+
+    return {
+        "study_mode": study_mode,
+        "patient_id": patient_id,
+        "session": session,
+        "base_name": base_name,
+        "sessions": sessions,
+        "pi": pi,
+    }
 
 
 def _master_dataframe(state: SessionState) -> pd.DataFrame:
@@ -176,9 +248,12 @@ def export_all_cacvr(state: SessionState, sessions: list, out_dir: str):
     workdir = tempfile.mkdtemp()
     manifest = []
     try:
-        master_name = f"{base}_Master.xlsx"
-        save_master_excel(state, os.path.join(workdir, master_name))
-        manifest.append(master_name)
+        # The master needs the raw recording. After a JSON reopen there is no
+        # raw data, so skip it rather than write an empty sheet.
+        if state.raw_headers and state.raw_rows:
+            master_name = f"{base}_Master.xlsx"
+            save_master_excel(state, os.path.join(workdir, master_name))
+            manifest.append(master_name)
 
         used = set()
         for s in sessions:
@@ -207,30 +282,11 @@ def export_all_cacvr(state: SessionState, sessions: list, out_dir: str):
 
 
 def _write_progress_json(state: SessionState, sessions: list, path: str):
-    """The redo safety-net: patient/session metadata + every saved session's
-    CA/CVR results + the current PI epochs, in one strict-JSON file."""
-    payload = {
-        "patient_id": state.patient_id,
-        "session": state.session,
-        "raw_path": state.raw_path,
-        "cacvr_sessions": {
-            (s.get("label") or "nolabel"): _serialise_dict(s.get("results", {}))
-            for s in sessions
-        },
-        "log": state.log_lines,
-    }
-    if state.pi_epochs:
-        payload["pi"] = {
-            "speed": state.pi_speed,
-            "vessel": state.pi_vessel,
-            "summary": pi_analysis.summarize(state.pi_epochs),
-            "epochs": [
-                _serialise_dict({k: v for k, v in e.items() if k not in ("time", "amp")})
-                for e in pi_analysis.numbered(state.pi_epochs)
-            ],
-        }
+    """The redo safety-net bundled inside the study zip — same schema as the
+    standalone progress file, so either one can be reopened."""
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2, default=str, allow_nan=False)
+        json.dump(build_progress_payload(state, sessions), f,
+                  indent=2, default=str, allow_nan=False)
 
 
 def _safe_stem(s: str) -> str:

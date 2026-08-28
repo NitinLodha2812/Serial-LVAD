@@ -1,21 +1,30 @@
-# Serial LVAD Study (v10)
+# LVAD GUI
 
 A desktop-style web application for analyzing cerebral blood-flow physiology in
 LVAD (Left Ventricular Assist Device) patients. It is a Python/Flask port of the
-original MATLAB tool (`CAwindow_v10`).
+original MATLAB tools.
 
-From a raw recording sampled at **125 Hz**, the app computes clinical metrics
-for the **MCA** (middle cerebral artery) and **PCA** (posterior cerebral
-artery) vessels:
+The same GUI serves **two studies**, picked by which load button you use:
 
-- **CA / Mx index** — Cerebral Autoregulation, via the Mx correlation index.
+- **Serial LVAD** — longitudinal, one visit per file over ~2 years, two vessels
+  (**MCA** and **PCA**). Results are tagged by **Vessel**.
+- **RAMPs** — one visit, many LVAD speeds in one file, **MCA** only. Results are
+  tagged by **Speed**.
+
+The title bar reads **LVAD GUI** until you load a study, then becomes
+**Serial LVAD Study** or **RAMPs Study**.
+
+From a raw recording sampled at **125 Hz**, the app computes:
+
+- **CA / Mx index** — Cerebral Autoregulation, via the Mx correlation index
+  (plus a standalone **MFV-only** 3-minute measurement).
 - **CVR** — Cerebrovascular Reactivity to CO₂ (both **MCVR** and **WCVR**).
 - **PI** — Pulsatility Index per beat epoch, for **native** (heart-driven) vs
-  **artificial** (pump-driven) beats. Ported from the separate MATLAB `PI.m`
-  epoch-selector tool.
+  **artificial** (pump-driven) beats. Ported from the separate MATLAB `PI.m`.
 
-Results can be exported as a unified Excel workbook or a JSON progress file;
-the PI tab writes its own `PI Demographics` spreadsheet.
+CA and CVR are tagged, accumulated, and exported together from one place on the
+Main screen. PI keeps its own separate export. A run can be saved to a JSON
+progress file and reopened later to continue.
 
 ---
 
@@ -165,9 +174,13 @@ by **fixed position** (0-indexed):
 The time vector is rebuilt from column 0 and zeroed so the recording starts at
 `t = 0`. If timestamps cannot be parsed, time falls back to sample index ÷ 125 Hz.
 
-**Patient ID and session** are auto-detected from the file name (e.g.
-`LVAD012_Session3.txt` → Patient `VAD012`, `Session3`). You can edit both fields
-in the UI after loading.
+**Patient ID** is auto-detected from the file name, per study:
+
+- **Serial LVAD** — `LVAD012_Session3.txt` → `VAD012`.
+- **RAMPs** — `RAMPs001`, `RAMP012`, and `R025` all normalise to `R###`
+  (`R001`, `R012`, `R025`) using the number after the R/RAMP(s) token.
+
+You can edit the Patient field in the UI after loading.
 
 Any non-empty value in the last column (other than `-` or `nan`) is recorded as a
 timestamped **mark** and shown as a toggleable line on the plots.
@@ -180,21 +193,39 @@ The interface has four tabs.
 
 ### Main Screen
 
-1. Click **Load File (.txt / .csv)** and choose your recording.
-2. On success, the Patient/Session fields fill in, the status bar shows the
-   sample count, and the **Activity Log** records each step.
-3. Edit Patient ID / Session if needed.
-4. Use **Save** (and the format dropdown) at any point to export results.
+The Main screen is the single home for loading, tagging, saving, and exporting.
+
+1. **Load Study** — click **Load Serial LVAD Data** or **Load RAMPs Data** and
+   choose your `.txt`/`.csv` recording. The title bar and the tag vocabulary
+   switch to match the study. The **Patient** field auto-fills (see
+   [auto-naming](#input-data-format)); edit it if needed.
+2. **Working Session (CA & CVR)** — set the tag (**Vessel** for Serial LVAD,
+   e.g. `MCA`/`PCA`; **Speed** for RAMPs). Compute on the CA and CVR tabs; each
+   tag auto-saves. **Save & Next** moves to a new tag; **Load…** restores a
+   saved tag's results for review.
+3. **Save & Export** — **Save Progress (JSON)** writes a reopenable snapshot of
+   every tag's results. **Export All Study (zip)** is the final export (master
+   data + one workbook per tag + the JSON). **Load Progress (JSON)…** reopens a
+   saved progress file to continue later.
+
+The **Activity Log** records every step, including the CVR values as they are
+calculated.
 
 ### CA (Mx) tab
 
 1. Click **Select Start (5-min)**, then click on either plot to set the start of
    a 5-minute analysis window (37,500 samples at 125 Hz).
-2. Pick the vessel (**MCA** or **PCA**) in the header dropdown.
-3. Click **Calculate MX**. The Mx index appears in the result box.
+2. Click **Calculate MX**. The **MX Index** and **Mean MFV** appear right under
+   the buttons. The result is tagged automatically (the vessel is derived from
+   the study/tag — RAMPs is always MCA — so there is no vessel dropdown).
    - Internally: non-overlapping 3-second averages of ABP/envU → MAP/MFV series,
      then a sliding Pearson correlation (21-value window, step 20) → **Mx = mean
      of the absolute correlation coefficients**.
+3. **Calculate MFV only (3-min)** — click the button, then click the TCD plot to
+   start a **3-minute** epoch. The app collects 3 minutes of valid (non-NaN)
+   envelope samples, averages them, and prints the result in the **Mean MFV**
+   box while the **MX** box stays empty. Use this when you only need MFV (a
+   shorter, TCD-only measurement, no ABP).
 4. **Clear Selection** removes the window. Use the zoom dropdown + **Apply Zoom**
    (or scroll to zoom, **Shift+drag** to pan) to navigate.
 
@@ -218,41 +249,58 @@ The two selection surfaces are **decoupled**:
   **ΔCO₂ = hypercapnia − baseline** appear in the sidebar readout. (If the exact
   clicked sample was brushed out, it snaps to the nearest valid sample.)
 
-Then choose the vessel and click **Calculate CVR**:
+Click **Calculate CVR** (the vessel is derived from the tag; no dropdown):
 
 ```
 MCVR = (ΔMCBF / baseline MCBF) x (100 / ΔCO2)
 WCVR = (ΔWCBF / baseline WCBF) x (100 / ΔCO2)
 ```
 
-**Clear Selection** resets the TCD windows and both CO₂ points.
+The printed calculation values (MCVR, WCVR, and the baseline/hypercapnia/delta
+MCBF, WCBF and CO₂) appear in a small table **right under the Calculate CVR
+button**.
 
-Repeat the CA and CVR steps for both **MCA** and **PCA** to capture a full
-session before exporting.
+**Selective clear** — the **Selections** panel lists each active selection
+(baseline window, hypercapnia window, CO₂ baseline, CO₂ hypercapnia). Click the
+**×** next to one to remove just that selection, or **Clear All Selections** to
+remove them all (as on the PI tab). CA does not need this — it has only one
+window.
 
-### CA/CVR sessions and one-shot study export
+### CA/CVR tags and one-shot study export
 
-CA and CVR results are **accumulated per session/speed** (the same model as the
-PI tab) so a whole study exports once at the end instead of re-writing the huge
-raw data on every save:
+CA and CVR results are **accumulated per tag** so a whole study exports once at
+the end instead of re-writing the huge raw data on every save. All of these
+controls live in one place on the **Main screen** (not on the CA/CVR tabs):
 
-1. Set the **Session / Speed** label (shared between the CA and CVR tabs).
-2. Compute CA and CVR for that label — results auto-save the moment they're
+1. Set the tag — **Vessel** (Serial LVAD, e.g. `MCA`/`PCA`) or **Speed** (RAMPs).
+2. Compute CA and CVR for that tag — results auto-save the moment they're
    calculated.
-3. **Save & Next Session** starts a clean label (offering to reload it if it was
-   worked on before). **Load Session…** restores a saved label's results and
-   selection windows for review.
-4. When the whole study is done, **Export All Study (zip)** produces a single
+3. **Save & Next Vessel/Speed** starts a clean tag (offering to reload it if it
+   was worked on before). **Load Vessel/Speed…** restores a saved tag's results
+   and selection windows for review.
+4. **Save Progress (JSON)** at any time writes a small, reopenable snapshot of
+   every tag's results.
+5. When the whole study is done, **Export All Study (zip)** produces a single
    download containing:
    - one **`*_Master.xlsx`** — the raw data with all edits, written **once**;
-   - one **`<patient>_<label>.xlsx`** per session/speed, each with the CA and
-     CVR sheets in that one workbook;
-   - one **`*_progress.json`** — a reloadable snapshot of everything (the redo
-     safety net).
+   - one **`<patient>_<tag>.xlsx`** per tag, each with the CA and CVR sheets;
+   - one **`*_progress.json`** — a reloadable snapshot of everything.
 
 Because the giant Master sheet is written a single time rather than per save,
-exporting a multi-session study is much faster. The PI tab keeps its **own**
+exporting a multi-tag study is much faster. The PI tab keeps its **own**
 separate `PI Demographics` export and is not part of this bundle.
+
+### Reopening a saved study
+
+**Load Progress (JSON)…** on the Main screen reopens a previously saved progress
+file (from **Save Progress** or the JSON inside an **Export All** zip) and
+restores every tag's results, so you can review them, load a tag, or re-export —
+the same idea as reopening in the PI GUI. The raw waveform is **not** stored in
+the JSON, so the plots stay empty until you load the original recording; because
+the restored tags are keyed by the recording's name, loading that recording
+afterwards lines them straight back up. (Reopening a raw `.txt`/`.csv` still goes
+through the two **Load … Data** buttons; the Excel files are not used for
+reopening.)
 
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*

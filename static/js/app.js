@@ -52,10 +52,15 @@ async function api(url, opts = {}) {
 // Y-zoom / X-pan buttons shared by every tab.
 const navIds = (p) => [`${p}YIn`, `${p}YOut`, `${p}YReset`, `${p}PanL`, `${p}PanR`];
 
+// The active study mode ('serial_lvad' | 'ramps'), set on load/reopen.
+let studyMode = 'serial_lvad';
+const isRamps = () => studyMode === 'ramps';
+// What the CA/CVR working tag is called, per study.
+const tagWord = () => isRamps() ? 'Speed' : 'Vessel';
+
 function enableCA(yes) {
-  ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caZoomMenu', 'caZoomBtn',
-   'caBrushBtn', 'caSessLabel', 'caLoadSessBtn', 'caNextSessBtn', 'caExportAllBtn',
-   ...navIds('ca')].forEach(id => {
+  ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caMfvBtn', 'caZoomMenu', 'caZoomBtn',
+   'caBrushBtn', ...navIds('ca')].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -63,11 +68,30 @@ function enableCA(yes) {
 function enableCVR(yes) {
   ['cvrSelectBaseBtn', 'cvrSelectHypBtn', 'cvrCo2BaseBtn', 'cvrCo2HypBtn',
    'cvrClearBtn', 'cvrCalcBtn', 'cvrZoomMenu', 'cvrZoomBtn',
-   'cvrBrushBtn',
-   'cvrSessLabel', 'cvrLoadSessBtn', 'cvrNextSessBtn', 'cvrExportAllBtn',
-   ...navIds('cvr')].forEach(id => {
+   'cvrBrushBtn', ...navIds('cvr')].forEach(id => {
     $(id).disabled = !yes;
   });
+}
+
+// The consolidated Main-screen session/save/export controls.
+function enableMainSave(yes) {
+  ['cacvrLabelInput', 'cacvrLoadBtn', 'cacvrNextBtn',
+   'saveProgressBtn', 'exportAllBtn'].forEach(id => {
+    $(id).disabled = !yes;
+  });
+}
+
+/* Relabel the header title, mode badge, and the tag controls for the mode. */
+function applyStudyMode(mode) {
+  studyMode = (mode === 'ramps') ? 'ramps' : 'serial_lvad';
+  $('appTitle').textContent = isRamps() ? 'RAMPs Study' : 'Serial LVAD Study';
+  $('modeBadge').textContent = isRamps() ? 'RAMPs' : 'Serial LVAD';
+  $('modeBadgeField').style.display = '';
+  const word = tagWord();
+  $('cacvrTagLabel').textContent = word;
+  $('cacvrLabelInput').placeholder = isRamps() ? 'e.g. 9600' : 'MCA';
+  $('cacvrLoadBtn').textContent = `Load ${word}…`;
+  $('cacvrNextBtn').textContent = `Save & Next ${word}`;
 }
 
 function enablePI(yes) {
@@ -103,31 +127,32 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 /* ═══════════════════════ FILE LOAD ═══════════════════════ */
 
-$('loadBtn').addEventListener('click', () => {
-  $('fileInput').click();
-});
+// The two load buttons share one file picker; this remembers which was clicked.
+let pendingMode = 'serial_lvad';
+
+$('loadSerialBtn').addEventListener('click', () => { pendingMode = 'serial_lvad'; $('fileInput').click(); });
+$('loadRampsBtn').addEventListener('click',  () => { pendingMode = 'ramps';       $('fileInput').click(); });
 
 $('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   showLoading();
-  appendLog(`Loading file: ${file.name} ...`);
+  appendLog(`Loading ${pendingMode === 'ramps' ? 'RAMPs' : 'Serial LVAD'} file: ${file.name} ...`);
 
   const form = new FormData();
   form.append('file', file);
+  form.append('study_mode', pendingMode);
 
   try {
     sessionData = await api('/api/load', { method: 'POST', body: form });
 
+    // study mode + title + tag vocabulary
+    applyStudyMode(sessionData.study_mode);
+
     // fill metadata
     $('patientId').value = sessionData.patient_id;
-    $('sessionId').value = sessionData.session;
     $('patientId').disabled = false;
-    $('sessionId').disabled = false;
-    $('vesselSelect').disabled = false;
-    $('saveFormat').disabled = false;
-    $('saveBtn').disabled = false;
 
     // init charts
     caCharts.init(sessionData);
@@ -142,6 +167,7 @@ $('fileInput').addEventListener('change', async (e) => {
     enableCA(true);
     enableCVR(true);
     enablePI(true);
+    enableMainSave(true);
     updateStatus(true);
 
     await initPITab();
@@ -214,9 +240,40 @@ $('patientId').addEventListener('change', async () => {
   appendLog('Patient ID updated to: ' + $('patientId').value);
 });
 
-$('sessionId').addEventListener('change', async () => {
-  try { await api('/api/metadata', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ session: $('sessionId').value }) }); } catch {}
-  appendLog('Session updated to: ' + $('sessionId').value);
+
+/* ═══════════════════════ REOPEN PROGRESS (JSON) ═══════════════════════ */
+
+$('reopenBtn').addEventListener('click', () => $('jsonInput').click());
+
+$('jsonInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  showLoading();
+  appendLog(`Reopening progress file: ${file.name} ...`);
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const r = await api('/api/reopen', { method: 'POST', body: form });
+    sessionData = null;   // no raw waveform — plots stay empty
+    applyStudyMode(r.study_mode);
+    $('patientId').value = r.patient_id;
+    $('patientId').disabled = false;
+    // Working save/load/export works on restored results; analysis tabs need
+    // the raw recording, so leave them disabled until it is loaded.
+    enableMainSave(true);
+    $('cacvrLabelInput').value = r.current_label || '';
+    $('statusDot').classList.add('loaded');
+    $('statusText').textContent = `${r.patient_id} — reopened (${r.n_sessions} tag${r.n_sessions === 1 ? '' : 's'}, no raw data)`;
+    appendLog(`Reopened ${r.patient_id} [${r.study_mode}] — restored ${r.n_sessions} tag(s): ${r.restored_labels.join(', ')}.`);
+    if (r.pi_epochs) appendLog(`(Progress file also carried ${r.pi_epochs} PI epoch metric(s).)`);
+    appendLog('Load the original recording to see plots and re-select. Use "Load ' + tagWord() + '…" to review restored results.');
+    toast(`Reopened ${r.n_sessions} saved tag(s)`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('Reopen error: ' + err.message);
+  }
+  hideLoading();
+  e.target.value = '';
 });
 
 
@@ -234,6 +291,7 @@ $('caSelectBtn').addEventListener('click', () => {
 // listen for click on CA canvases
 ['caPlot1', 'caPlot2'].forEach(id => {
   $(id).addEventListener('click', async (e) => {
+    if (clickMode === 'ca_mfv') { await caMfvSelect(e, id); return; }
     if (clickMode !== 'ca_select') return;
     clickMode = null;
     $('caPlot1').parentElement.classList.remove('clickable');
@@ -274,24 +332,26 @@ $('caClearBtn').addEventListener('click', async () => {
 });
 
 
-/* ═══════════════════════ CA — CALCULATE ═══════════════════════ */
+/* ═══════════════════════ CA — CALCULATE MX ═══════════════════════ */
+
+// The vessel is now derived server-side from the study mode / working tag,
+// so the tag label is what we echo back to the user.
+const cacvrTag = () => ($('cacvrLabelInput').value || (isRamps() ? '' : 'MCA')).trim();
 
 $('caCalcBtn').addEventListener('click', async () => {
   showLoading();
   try {
-    const vessel = $('vesselSelect').value;
     const result = await api('/api/ca/calculate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vessel }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
+    const tag = cacvrTag();
     const mxTxt = Number.isFinite(result.final_mx) ? result.final_mx.toFixed(4) : '—';
     const mfv = result.mean_mfv;
     const mfvTxt = (mfv == null || !Number.isFinite(mfv)) ? '—' : mfv.toFixed(2);
-    $('caResultValue').textContent = `${mxTxt} (${vessel})`;
-    $('caMeanMfv').textContent     = `${mfvTxt} (${vessel})`;
+    $('caResultValue').textContent = `${mxTxt}${tag ? ' (' + tag + ')' : ''}`;
+    $('caMeanMfv').textContent     = `${mfvTxt}${tag ? ' (' + tag + ')' : ''}`;
     $('caResultBox').classList.remove('hidden');
-    appendLog(`CA: MX = ${mxTxt}, Mean MFV = ${mfvTxt} (${vessel})`);
+    appendLog(`CA: MX = ${mxTxt}, Mean MFV = ${mfvTxt}${tag ? ' (' + tag + ')' : ''}`);
     toast(`MX = ${mxTxt}, Mean MFV = ${mfvTxt}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
@@ -299,6 +359,44 @@ $('caCalcBtn').addEventListener('click', async () => {
   }
   hideLoading();
 });
+
+
+/* ═══════════════════════ CA — MFV ONLY (3-min TCD epoch) ═══════════════════════ */
+
+$('caMfvBtn').addEventListener('click', () => {
+  clickMode = 'ca_mfv';
+  toast('Click the TCD plot to set the 3-minute MFV-only start', 'info');
+  appendLog('CA: Click the TCD (envU) plot to start a 3-minute MFV-only epoch.');
+  $('caPlot1').parentElement.classList.add('clickable');
+  $('caPlot2').parentElement.classList.add('clickable');
+});
+
+async function caMfvSelect(e, id) {
+  clickMode = null;
+  $('caPlot1').parentElement.classList.remove('clickable');
+  $('caPlot2').parentElement.classList.remove('clickable');
+  const chart = id === 'caPlot1' ? caCharts.chart1 : caCharts.chart2;
+  const clickX = caCharts.getClickX(chart, e);
+  showLoading();
+  try {
+    const r = await api('/api/ca/mfv_only', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_time: clickX }),
+    });
+    caCharts.addSelection({ start_time: r.start_time, end_time: r.end_time });
+    const tag = cacvrTag();
+    $('caResultValue').textContent = '—';   // MX box stays empty for MFV-only
+    $('caMeanMfv').textContent = `${r.mean_mfv.toFixed(2)}${tag ? ' (' + tag + ')' : ''}`;
+    $('caResultBox').classList.remove('hidden');
+    appendLog(`CA: MFV-only = ${r.mean_mfv.toFixed(2)} over 3-min TCD epoch `
+            + `t=${r.start_time.toFixed(1)}..${r.end_time.toFixed(1)}${tag ? ' (' + tag + ')' : ''}.`);
+    toast(`Mean MFV = ${r.mean_mfv.toFixed(2)} (3-min, TCD only)`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CA MFV-only error: ' + err.message);
+  }
+  hideLoading();
+}
 
 
 /* ═══════════════════════ CA — ZOOM ═══════════════════════ */
@@ -365,23 +463,15 @@ CVR_TCD_IDS.forEach(id => {
     disarmClick();
     showLoading();
     try {
-      if (mode === 'cvr_base') {
-        const sel = await api('/api/cvr/select_baseline', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start_time: clickX }),
-        });
-        cvrCharts.addBaseline(sel);
-        appendLog(`CVR: Baseline window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)}`);
-        toast('Baseline window selected', 'success');
-      } else {
-        const sel = await api('/api/cvr/select_hypercapnia', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start_time: clickX }),
-        });
-        cvrCharts.addHypercapnia(sel);
-        appendLog(`CVR: Hypercapnia window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)}`);
-        toast('Hypercapnia window selected', 'success');
-      }
+      const url = mode === 'cvr_base' ? '/api/cvr/select_baseline' : '/api/cvr/select_hypercapnia';
+      const sel = await api(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start_time: clickX }),
+      });
+      await refreshCvrSelections();
+      const w = mode === 'cvr_base' ? 'Baseline' : 'Hypercapnia';
+      appendLog(`CVR: ${w} window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)}`);
+      toast(`${w} window selected`, 'success');
     } catch (err) {
       toast(err.message, 'error');
       appendLog(`CVR ${mode} error: ` + err.message);
@@ -402,9 +492,7 @@ $(CVR_CO2_ID).addEventListener('click', async (e) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ which, time: clickX }),
     });
-    cvrCharts.addCo2Point(which, r.time, r.value);
-    if (which === 'baseline') cvrCo2Base = r.value; else cvrCo2Hyp = r.value;
-    updateCvrCo2Readout();
+    await refreshCvrSelections();
     appendLog(`CVR: ${which} CO2 = ${r.value.toFixed(2)} mmHg at t=${r.time.toFixed(1)}`);
     toast(`${which === 'baseline' ? 'Baseline' : 'Hypercapnia'} CO2 = ${r.value.toFixed(2)} mmHg`, 'success');
   } catch (err) {
@@ -415,37 +503,104 @@ $(CVR_CO2_ID).addEventListener('click', async (e) => {
 });
 
 
-/* ═══════════════════════ CVR — CLEAR ═══════════════════════ */
+/* ═══════════ CVR — SELECTIVE CLEAR (list + remove one + clear all) ═══════════ */
+
+// Redraw every CVR overlay, the CO2 readout, and the selection list from the
+// server's authoritative selection state.
+function applyCvrSelections(sels) {
+  sels = sels || {};
+  cvrCharts.clearOverlays();
+  cvrCo2Base = cvrCo2Hyp = null;
+  if (sels.baseline) cvrCharts.addBaseline({ start_time: sels.baseline.start, end_time: sels.baseline.end });
+  if (sels.hypercapnia) cvrCharts.addHypercapnia({ start_time: sels.hypercapnia.start, end_time: sels.hypercapnia.end });
+  if (sels.co2_baseline) { cvrCharts.addCo2Point('baseline', sels.co2_baseline.time, sels.co2_baseline.value); cvrCo2Base = sels.co2_baseline.value; }
+  if (sels.co2_hypercapnia) { cvrCharts.addCo2Point('hypercapnia', sels.co2_hypercapnia.time, sels.co2_hypercapnia.value); cvrCo2Hyp = sels.co2_hypercapnia.value; }
+  updateCvrCo2Readout();
+  renderCvrSelList(sels);
+}
+
+async function refreshCvrSelections() {
+  try { applyCvrSelections(await api('/api/cvr/selections')); }
+  catch (err) { appendLog('CVR selections error: ' + err.message); }
+}
+
+const CVR_SEL_META = [
+  ['baseline',        'Baseline window',    (s) => `${s.start.toFixed(1)}–${s.end.toFixed(1)} s`],
+  ['hypercapnia',     'Hypercapnia window', (s) => `${s.start.toFixed(1)}–${s.end.toFixed(1)} s`],
+  ['co2_baseline',    'CO2 baseline',       (s) => `${s.value.toFixed(2)} mmHg @ ${s.time.toFixed(1)} s`],
+  ['co2_hypercapnia', 'CO2 hypercapnia',    (s) => `${s.value.toFixed(2)} mmHg @ ${s.time.toFixed(1)} s`],
+];
+
+function renderCvrSelList(sels) {
+  const box = $('cvrSelList');
+  box.innerHTML = '';
+  const present = CVR_SEL_META.filter(([k]) => sels[k]);
+  if (!present.length) {
+    box.innerHTML = '<div class="sel-empty">No selections yet.</div>';
+    $('cvrClearBtn').disabled = true;
+    return;
+  }
+  for (const [key, name, info] of present) {
+    const row = document.createElement('div');
+    row.className = 'sel-item';
+    const n = document.createElement('span'); n.className = 'sel-name'; n.textContent = name;
+    const i = document.createElement('span'); i.className = 'sel-info'; i.textContent = info(sels[key]);
+    const x = document.createElement('button');
+    x.className = 'sel-remove'; x.textContent = '×'; x.title = 'Remove this selection';
+    x.addEventListener('click', () => removeCvrSelection(key, name));
+    row.append(n, i, x);
+    box.appendChild(row);
+  }
+  $('cvrClearBtn').disabled = false;
+}
+
+async function removeCvrSelection(which, name) {
+  try {
+    const sels = await api('/api/cvr/remove_selection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ which }),
+    });
+    applyCvrSelections(sels);
+    $('cvrResultBox').classList.add('hidden');
+    appendLog(`CVR: removed ${name}.`);
+    toast(`Removed ${name}`, 'info');
+  } catch (err) { toast(err.message, 'error'); }
+}
 
 $('cvrClearBtn').addEventListener('click', async () => {
   try {
     await api('/api/cvr/clear', { method: 'POST' });
-    cvrCharts.clearOverlays();
+    applyCvrSelections({});
     $('cvrResultBox').classList.add('hidden');
-    cvrCo2Base = cvrCo2Hyp = null;
-    updateCvrCo2Readout();
     disarmClick();
-    appendLog('CVR: Selections cleared.');
-    toast('Selections cleared', 'info');
+    appendLog('CVR: all selections cleared.');
+    toast('All selections cleared', 'info');
   } catch (err) { toast(err.message, 'error'); }
 });
 
 
 /* ═══════════════════════ CVR — CALCULATE ═══════════════════════ */
 
+function setCvrSummary(r) {
+  const f = (v, d = 2) => (v == null || !Number.isFinite(v)) ? '—' : v.toFixed(d);
+  $('cvrMCVR').textContent = f(r.mcvr, 4);
+  $('cvrWCVR').textContent = f(r.wcvr, 4);
+  $('sBaseMcbf').textContent = f(r.base_mcbf); $('sBaseWcbf').textContent = f(r.base_wcbf); $('sBaseCo2').textContent = f(r.base_co2);
+  $('sHypMcbf').textContent = f(r.hyp_mcbf);   $('sHypWcbf').textContent = f(r.hyp_wcbf);   $('sHypCo2').textContent = f(r.hyp_co2);
+  $('sDMcbf').textContent = f(r.delta_mcbf);   $('sDWcbf').textContent = f(r.delta_wcbf);   $('sDCo2').textContent = f(r.delta_co2);
+}
+
 $('cvrCalcBtn').addEventListener('click', async () => {
   showLoading();
   try {
-    const vessel = $('vesselSelect').value;
     const result = await api('/api/cvr/calculate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vessel }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
-    $('cvrMCVR').textContent = result.mcvr.toFixed(4);
-    $('cvrWCVR').textContent = result.wcvr.toFixed(4);
+    setCvrSummary(result);
     $('cvrResultBox').classList.remove('hidden');
-    appendLog(`CVR: MCVR = ${result.mcvr.toFixed(4)}, WCVR = ${result.wcvr.toFixed(4)} (${vessel})`);
+    const tag = cacvrTag();
+    appendLog(`CVR: MCVR = ${result.mcvr.toFixed(4)}, WCVR = ${result.wcvr.toFixed(4)}${tag ? ' (' + tag + ')' : ''}`);
+    appendLog(`CVR: base CO2 ${result.base_co2}, hyp CO2 ${result.hyp_co2}, delta CO2 ${result.delta_co2} mmHg`);
     toast(`MCVR = ${result.mcvr.toFixed(4)}, WCVR = ${result.wcvr.toFixed(4)}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
@@ -698,7 +853,9 @@ $('piEpochAll').addEventListener('change', (e) => {
 
 /* ── first-load setup ── */
 async function initPITab() {
-  $('piVessel').value = $('vesselSelect').value;
+  // PI keeps its own Speed + Vessel fields (separate from CA/CVR). Default the
+  // vessel to MCA (the only RAMPs vessel; a sensible Serial LVAD starting point).
+  if (!$('piVessel').value) $('piVessel').value = 'MCA';
   piChart.setBrushMode(true);
   $('piBrushBtn').textContent = 'Brush: ON';
   $('piBrushBtn').classList.add('btn-primary');
@@ -985,14 +1142,10 @@ $('piNextSpeedBtn').addEventListener('click', async () => {
 
 
 /* ═══════════════════════════════════════════════════════════════
-   CA/CVR SESSION/SPEED — tag results, move on, export the whole
-   study once (master + per-session workbooks + JSON, zipped).
+   CA/CVR WORKING SESSION — one consolidated set of controls on the
+   Main screen. The tag is a Vessel (Serial LVAD) or a Speed (RAMPs);
+   results are tagged, accumulated, and exported together (PI separate).
    ═══════════════════════════════════════════════════════════════ */
-
-function syncCacvrLabels(label) {
-  if (document.activeElement !== $('caSessLabel')) $('caSessLabel').value = label;
-  if (document.activeElement !== $('cvrSessLabel')) $('cvrSessLabel').value = label;
-}
 
 async function pushCacvrLabel(label) {
   try {
@@ -1000,86 +1153,81 @@ async function pushCacvrLabel(label) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label }),
     });
-    syncCacvrLabels(r.label);
-  } catch (err) { appendLog('CA/CVR meta error: ' + err.message); }
+    if (document.activeElement !== $('cacvrLabelInput')) $('cacvrLabelInput').value = r.label;
+  } catch (err) { appendLog('CA/CVR tag error: ' + err.message); }
 }
 
+// Vessel key to show a summary under, given the current tag / mode.
 function _pickVessel(map) {
   map = map || {};
-  const v = $('vesselSelect').value;
-  if (map[v]) return [v, map[v]];
+  const pref = isRamps() ? 'MCA' : (cacvrTag().toUpperCase());
+  if (map[pref]) return [pref, map[pref]];
   const k = Object.keys(map)[0];
   return k ? [k, map[k]] : [null, null];
 }
 
-/* Populate the CA + CVR result boxes from a session summary (used after
-   loading a saved session). */
+/* Fill the CA + CVR result boxes from a loaded tag's summary. */
 function renderCacvrResults(summary) {
   summary = summary || {};
   const [cv, ca] = _pickVessel(summary.ca);
   if (ca) {
     const mx = ca.final_mx, mfv = ca.mean_mfv;
-    $('caResultValue').textContent = `${(mx == null || !Number.isFinite(mx)) ? '—' : mx.toFixed(4)} (${cv})`;
-    $('caMeanMfv').textContent = `${(mfv == null || !Number.isFinite(mfv)) ? '—' : mfv.toFixed(2)} (${cv})`;
+    $('caResultValue').textContent = `${(mx == null || !Number.isFinite(mx)) ? '—' : mx.toFixed(4)}${cv ? ' (' + cv + ')' : ''}`;
+    $('caMeanMfv').textContent = `${(mfv == null || !Number.isFinite(mfv)) ? '—' : mfv.toFixed(2)}${cv ? ' (' + cv + ')' : ''}`;
     $('caResultBox').classList.remove('hidden');
   } else {
     $('caResultBox').classList.add('hidden');
   }
-  const [vv, cvr] = _pickVessel(summary.cvr);
+  const [, cvr] = _pickVessel(summary.cvr);
   if (cvr) {
-    $('cvrMCVR').textContent = (cvr.mcvr == null || !Number.isFinite(cvr.mcvr)) ? '—' : cvr.mcvr.toFixed(4);
-    $('cvrWCVR').textContent = (cvr.wcvr == null || !Number.isFinite(cvr.wcvr)) ? '—' : cvr.wcvr.toFixed(4);
+    setCvrSummary(cvr);
     $('cvrResultBox').classList.remove('hidden');
   } else {
     $('cvrResultBox').classList.add('hidden');
   }
 }
 
-/* Redraw the shaded selection windows and CO2 points from a loaded session. */
+/* Redraw shaded windows + CO2 points + the CVR selection list from a loaded
+   tag's stored selection ranges (review). */
 function redrawCacvrSelections(sel) {
   caCharts.clearSelection();
   cvrCharts.clearOverlays();
   cvrCo2Base = cvrCo2Hyp = null;
-  if (!sel) { updateCvrCo2Readout(); return; }
-  const box = (r) => ({ start_time: r.start, end_time: r.end });
-  if (sel.ca) caCharts.addSelection(box(sel.ca));
-  if (sel.cvr_baseline) cvrCharts.addBaseline(box(sel.cvr_baseline));
-  if (sel.cvr_hypercapnia) cvrCharts.addHypercapnia(box(sel.cvr_hypercapnia));
-  if (sel.cvr_co2_baseline) {
-    cvrCharts.addCo2Point('baseline', sel.cvr_co2_baseline.time, sel.cvr_co2_baseline.value);
-    cvrCo2Base = sel.cvr_co2_baseline.value;
-  }
-  if (sel.cvr_co2_hypercapnia) {
-    cvrCharts.addCo2Point('hypercapnia', sel.cvr_co2_hypercapnia.time, sel.cvr_co2_hypercapnia.value);
-    cvrCo2Hyp = sel.cvr_co2_hypercapnia.value;
+  const listSels = {};
+  if (sel) {
+    const box = (r) => ({ start_time: r.start, end_time: r.end });
+    if (sel.ca) caCharts.addSelection(box(sel.ca));
+    if (sel.cvr_baseline) { cvrCharts.addBaseline(box(sel.cvr_baseline)); listSels.baseline = sel.cvr_baseline; }
+    if (sel.cvr_hypercapnia) { cvrCharts.addHypercapnia(box(sel.cvr_hypercapnia)); listSels.hypercapnia = sel.cvr_hypercapnia; }
+    if (sel.cvr_co2_baseline) { cvrCharts.addCo2Point('baseline', sel.cvr_co2_baseline.time, sel.cvr_co2_baseline.value); cvrCo2Base = sel.cvr_co2_baseline.value; listSels.co2_baseline = sel.cvr_co2_baseline; }
+    if (sel.cvr_co2_hypercapnia) { cvrCharts.addCo2Point('hypercapnia', sel.cvr_co2_hypercapnia.time, sel.cvr_co2_hypercapnia.value); cvrCo2Hyp = sel.cvr_co2_hypercapnia.value; listSels.co2_hypercapnia = sel.cvr_co2_hypercapnia; }
   }
   updateCvrCo2Readout();
+  renderCvrSelList(listSels);
 }
 
 async function initCacvrSession() {
   try {
     const st = await api('/api/cacvr/state');
-    // Default the label to the header Session on first load.
-    const label = st.label || $('sessionId').value || '';
-    syncCacvrLabels(label);
+    // Default the tag: MCA for Serial LVAD, blank for RAMPs (a speed value).
+    const label = st.label || (isRamps() ? '' : 'MCA');
+    $('cacvrLabelInput').value = label;
     if (label !== st.label) await pushCacvrLabel(label);
     renderCacvrResults(st.summary);
     redrawCacvrSelections(st.selections);
+    await refreshCvrSelections();
   } catch (err) {
     appendLog('CA/CVR session init error: ' + err.message);
   }
 }
 
-['caSessLabel', 'cvrSessLabel'].forEach(id => {
-  $(id).addEventListener('change', () => {
-    const label = $(id).value.trim();
-    syncCacvrLabels(label);
-    pushCacvrLabel(label);
-    appendLog(`CA/CVR: session/speed label set to "${label}".`);
-  });
+$('cacvrLabelInput').addEventListener('change', () => {
+  const label = $('cacvrLabelInput').value.trim();
+  pushCacvrLabel(label);
+  appendLog(`CA/CVR: ${tagWord()} tag set to "${label}".`);
 });
 
-/* ── load-session picker modal ── */
+/* ── load-tag picker modal ── */
 function openCacvrModal(sessions) {
   const list = $('cacvrSessList');
   list.innerHTML = '';
@@ -1088,7 +1236,7 @@ function openCacvrModal(sessions) {
     const ca = s.ca_vessels.length ? 'CA ' + s.ca_vessels.join('/') : '';
     const cvr = s.cvr_vessels.length ? 'CVR ' + s.cvr_vessels.join('/') : '';
     const bits = [ca, cvr].filter(Boolean).join(' · ') || 'no results';
-    btn.innerHTML = `<strong>${s.label ? 'Session ' + s.label : '(no label)'}</strong>` +
+    btn.innerHTML = `<strong>${s.label ? tagWord() + ' ' + s.label : '(no tag)'}</strong>` +
       `<span class="speed-meta">${bits} · ${s.filename}</span>`;
     btn.addEventListener('click', () => { closeCacvrModal(); loadCacvrSession(s.filename); });
     list.appendChild(btn);
@@ -1108,11 +1256,11 @@ async function loadCacvrSession(filename) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename }),
     });
-    syncCacvrLabels(r.label);
+    $('cacvrLabelInput').value = r.label;
     renderCacvrResults(r.summary);
     redrawCacvrSelections(r.loaded_selections);
-    appendLog(`CA/CVR: loaded session "${r.label}".`);
-    toast('CA/CVR session loaded', 'success');
+    appendLog(`CA/CVR: loaded ${tagWord()} "${r.label}".`);
+    toast(`Loaded ${tagWord()} ${r.label}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
     appendLog('CA/CVR load error: ' + err.message);
@@ -1120,20 +1268,20 @@ async function loadCacvrSession(filename) {
   hideLoading();
 }
 
-async function cacvrLoadSession() {
+$('cacvrLoadBtn').addEventListener('click', async () => {
   try {
     const { sessions } = await api('/api/cacvr/sessions');
-    if (!sessions.length) { toast('No saved CA/CVR sessions yet', 'info'); return; }
+    if (!sessions.length) { toast(`No saved ${tagWord().toLowerCase()}s yet`, 'info'); return; }
     openCacvrModal(sessions);
   } catch (err) { toast(err.message, 'error'); }
-}
-$('caLoadSessBtn').addEventListener('click', cacvrLoadSession);
-$('cvrLoadSessBtn').addEventListener('click', cacvrLoadSession);
+});
 
-async function cacvrNextSession() {
-  const next = prompt('Save this session/speed and start a new one.\nEnter the next session/speed label:', '');
+$('cacvrNextBtn').addEventListener('click', async () => {
+  const word = tagWord();
+  const next = prompt(`Save this ${word.toLowerCase()} and start a new one.\nEnter the next ${word.toLowerCase()}:`,
+                      isRamps() ? '' : 'PCA');
   if (next == null || !next.trim()) {
-    appendLog('CA/CVR: next session cancelled — nothing cleared.');
+    appendLog(`CA/CVR: next ${word.toLowerCase()} cancelled — nothing cleared.`);
     return;
   }
   showLoading();
@@ -1142,75 +1290,64 @@ async function cacvrNextSession() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label: next.trim() }),
     });
-    // Clear the working result boxes and selection overlays for the new label.
-    syncCacvrLabels(r.label);
+    $('cacvrLabelInput').value = r.label;
     $('caResultBox').classList.add('hidden');
     $('cvrResultBox').classList.add('hidden');
     caCharts.clearSelection();
-    cvrCharts.clearOverlays();
-    cvrCo2Base = cvrCo2Hyp = null;
-    updateCvrCo2Readout();
-    appendLog(`CA/CVR: saved previous session; ready for "${r.label}".`);
+    applyCvrSelections({});
+    appendLog(`CA/CVR: saved previous ${word.toLowerCase()}; ready for "${r.label}".`);
     if (r.existing_session &&
-        confirm(`Session "${r.label}" already has saved results. Load them?`)) {
+        confirm(`${word} "${r.label}" already has saved results. Load them?`)) {
       await loadCacvrSession(r.existing_session);
     } else {
-      toast(`Ready for session ${r.label}`, 'success');
+      toast(`Ready for ${word.toLowerCase()} ${r.label}`, 'success');
     }
   } catch (err) {
     toast(err.message, 'error');
-    appendLog('CA/CVR next-session error: ' + err.message);
+    appendLog(`CA/CVR next-${word.toLowerCase()} error: ` + err.message);
   }
   hideLoading();
-}
-$('caNextSessBtn').addEventListener('click', cacvrNextSession);
-$('cvrNextSessBtn').addEventListener('click', cacvrNextSession);
+});
 
-async function cacvrExportAll() {
+$('exportAllBtn').addEventListener('click', async () => {
   showLoading();
   try {
     const r = await api('/api/cacvr/export_all', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
-    const a = document.createElement('a');
-    a.href = '/api/download/' + r.filename;
-    a.download = r.filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    appendLog(`CA/CVR: exported study bundle ${r.filename} (${r.n_sessions} session workbook(s) + master + JSON).`);
-    toast(`Exported ${r.n_sessions} session(s) + master + JSON`, 'success');
+    downloadFile(r.filename);
+    appendLog(`CA/CVR: exported study bundle ${r.filename} (${r.n_sessions} tag workbook(s) + master + JSON).`);
+    toast(`Exported ${r.n_sessions} tag(s) + master + JSON`, 'success');
   } catch (err) {
     toast(err.message, 'error');
     appendLog('CA/CVR export error: ' + err.message);
   }
   hideLoading();
+});
+
+
+/* ═══════════════════════ SAVE PROGRESS (JSON) ═══════════════════════ */
+
+function downloadFile(filename) {
+  const a = document.createElement('a');
+  a.href = '/api/download/' + filename;
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
 }
-$('caExportAllBtn').addEventListener('click', cacvrExportAll);
-$('cvrExportAllBtn').addEventListener('click', cacvrExportAll);
 
-
-/* ═══════════════════════ SAVE ═══════════════════════ */
-
-$('saveBtn').addEventListener('click', async () => {
+$('saveProgressBtn').addEventListener('click', async () => {
   showLoading();
-  const fmt = $('saveFormat').value;
   try {
     const result = await api('/api/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ format: fmt }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format: 'json' }),
     });
-    // trigger download
-    const a = document.createElement('a');
-    a.href = '/api/download/' + result.filename;
-    a.download = result.filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    appendLog(`Saved: ${result.filename}`);
-    toast('File saved & downloaded', 'success');
+    downloadFile(result.filename);
+    appendLog(`Saved progress: ${result.filename}`);
+    toast('Progress JSON saved (reopenable later)', 'success');
   } catch (err) {
     toast(err.message, 'error');
-    appendLog('Save error: ' + err.message);
+    appendLog('Save progress error: ' + err.message);
   }
   hideLoading();
 });

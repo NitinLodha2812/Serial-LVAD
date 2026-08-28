@@ -7,11 +7,15 @@ import numpy as np
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask.json.provider import DefaultJSONProvider
 from backend.session_state import (
-    SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, BASELINE_SAMPLES, HYPERCAP_SAMPLES,
+    SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, THREE_MIN_SAMPLES,
+    BASELINE_SAMPLES, HYPERCAP_SAMPLES, MODE_RAMPS, MODE_SERIAL,
     window_end_for_valid_count,
 )
 from backend.calculations import compute_mx, compute_cvr
-from backend.export import save_excel, save_json, save_pi_excel, export_all_cacvr
+from backend.export import (
+    save_excel, save_progress_json, save_pi_excel, export_all_cacvr,
+    parse_progress_payload,
+)
 from backend import pi_analysis, cacvr_sessions
 from backend import export as export_backend
 
@@ -63,6 +67,20 @@ os.makedirs(CACVR_SESSION_DIR, exist_ok=True)
 state: SessionState | None = None
 
 
+def _current_vessel():
+    """Which vessel a CA/CVR result belongs to, now that the top-right vessel
+    dropdown is gone.
+
+    RAMPs collects MCA only. Serial LVAD collects MCA and PCA, and the working
+    label *is* the vessel (the operator processes one vessel at a time and moves
+    on with Save & Next Vessel), so the label doubles as the storage key.
+    """
+    if state is None or state.study_mode == MODE_RAMPS:
+        return "MCA"
+    lbl = (state.cacvr_speed or "").strip().upper()
+    return lbl if lbl in ("MCA", "PCA") else "MCA"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  PAGES
 # ═══════════════════════════════════════════════════════════════════════
@@ -92,13 +110,18 @@ def api_load():
 
     # A saved progress (.json) file is not a raw recording — it has no waveform
     # samples — so feeding it to the CSV parser yields a confusing tokenizing
-    # error. Catch it early with a clear message instead.
+    # error. Point the user at the reopen flow instead.
     if (f.filename or "").lower().endswith(".json"):
         return jsonify({"error": (
             "That looks like a saved progress (.json) file, not a raw recording. "
-            "Reopening saved progress isn't supported yet — please load the "
-            "original .txt/.csv recording."
+            "Use 'Load Progress (JSON)' to reopen it, or load the original "
+            ".txt/.csv recording here."
         )}), 400
+
+    # Which study? The two load buttons post mode=ramps|serial_lvad.
+    mode = (request.form.get("study_mode") or MODE_SERIAL).strip().lower()
+    if mode not in (MODE_RAMPS, MODE_SERIAL):
+        mode = MODE_SERIAL
 
     try:
         f.save(filepath)
@@ -108,7 +131,7 @@ def api_load():
     # Parse into a fresh state and only commit it to the global session on
     # success. Otherwise a failed load (wrong file, bad format) would wipe the
     # session the user is in the middle of working on.
-    new_state = SessionState()
+    new_state = SessionState(study_mode=mode)
     try:
         new_state.load_txt(filepath, f.filename)
     except Exception as e:
@@ -127,6 +150,95 @@ def api_load():
 
     state = new_state
     return jsonify(overview)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  REOPEN a saved progress JSON
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.route("/api/reopen", methods=["POST"])
+def api_reopen():
+    """
+    Reopen a previously exported progress JSON and restore the study so the
+    operator can review results, load any saved session/vessel, and re-export
+    — the same idea as reopening in the PI GUI.
+
+    The raw waveform is not stored in the JSON, so the plots stay empty until
+    the original recording is loaded. Because the restored sessions are keyed
+    by the recording's base name, loading that recording afterwards lines them
+    straight back up.
+    """
+    global state
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file provided"}), 400
+
+    import json as _json
+    try:
+        data = _json.load(f.stream)
+    except Exception as e:
+        return jsonify({"error": f"Not a valid JSON progress file: {e}"}), 400
+
+    try:
+        norm = parse_progress_payload(data)
+    except Exception as e:
+        return jsonify({"error": f"Could not read progress file: {e}"}), 400
+
+    if not norm["sessions"]:
+        return jsonify({"error": "This progress file has no CA/CVR results to reopen."}), 400
+
+    new_state = SessionState(study_mode=norm["study_mode"])
+    new_state.patient_id = norm["patient_id"]
+    new_state.session = norm["session"]
+    new_state.base_name = norm["base_name"]
+    new_state.log(
+        f"Reopened progress for {norm['patient_id']} [{norm['study_mode']}] — "
+        f"{len(norm['sessions'])} session(s). Load the original recording to see plots."
+    )
+
+    # Rewrite each restored session to disk so Load Session / Export All work.
+    restored = []
+    for s in norm["sessions"]:
+        label = s.get("label") or ""
+        payload = {
+            "base_name": new_state.base_name,
+            "patient_id": new_state.patient_id,
+            "label": label,
+            "results": s.get("results", {}),
+            "selections": s.get("selections", {}),
+        }
+        try:
+            cacvr_sessions.save_session(CACVR_SESSION_DIR, new_state.base_name, label, payload)
+            restored.append(label or "(no label)")
+        except Exception as e:
+            new_state.log(f"Reopen: could not restore session {label!r}: {e}")
+
+    # Adopt the first restored session as the working set.
+    first = norm["sessions"][0]
+    loaded = first.get("results") or {}
+    for a in ("CA", "CVR"):
+        loaded.setdefault(a, {})
+        for v in ("MCA", "PCA"):
+            loaded[a].setdefault(v, None)
+    new_state.results = loaded
+    new_state.cacvr_speed = first.get("label") or ""
+
+    pi = norm.get("pi") or {}
+    n_pi = (pi.get("summary") or {}).get("n_native", 0) + (pi.get("summary") or {}).get("n_artificial", 0)
+
+    state = new_state
+    return jsonify({
+        "reopened": True,
+        "study_mode": state.study_mode,
+        "patient_id": state.patient_id,
+        "session": state.session,
+        "base_name": state.base_name,
+        "restored_labels": restored,
+        "n_sessions": len(restored),
+        "current_label": state.cacvr_speed,
+        "pi_epochs": n_pi,
+        "load_log": list(state.log_lines),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -236,8 +348,7 @@ def api_ca_calculate():
     if state.ca_selection is None:
         return jsonify({"error": "No selection. Click Select Start first."}), 400
 
-    body = request.get_json() or {}
-    vessel = body.get("vessel", "MCA")
+    vessel = _current_vessel()
 
     abp = state.ca_selection["abp"]
     env = state.ca_selection["env"]
@@ -286,6 +397,84 @@ def api_ca_calculate():
     _cacvr_autosave()
 
     return jsonify(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CA – CALCULATE MFV ONLY  (3-min TCD-only epoch)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.route("/api/ca/mfv_only", methods=["POST"])
+def api_ca_mfv_only():
+    """
+    Mean flow velocity over a 3-minute epoch of the TCD envelope alone.
+
+    Same idea as the MFV that falls out of the MX calculation, but a shorter
+    window and no ABP: the operator clicks a start point, we walk forward to
+    collect 3 minutes of *valid* (non-NaN) envelope samples (extending past any
+    brushed-out data), and average them. There is no MX — the result fills the
+    Mean MFV box while the MX box stays empty.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+
+    body = request.get_json() or {}
+    start_time = float(body.get("start_time", 0))
+    idx_start = int(np.searchsorted(state.time, start_time))
+
+    valid = ~np.isnan(state.env_u)
+    idx_end, n_valid, exhausted = window_end_for_valid_count(
+        valid, idx_start, THREE_MIN_SAMPLES
+    )
+    n_extended = (idx_end - idx_start + 1) - THREE_MIN_SAMPLES
+    if exhausted:
+        state.log(
+            f"CA: MFV-only — not enough valid envelope samples to fill a 3-min "
+            f"window ({n_valid}/{THREE_MIN_SAMPLES}); using all available data."
+        )
+    elif n_extended > 0:
+        state.log(
+            f"CA: MFV-only window extended by {n_extended} samples "
+            f"({n_extended / SAMPLE_RATE:.1f}s) past removed data."
+        )
+
+    inds = slice(idx_start, idx_end + 1)
+    sel_time = state.time[inds].copy()
+    sel_env = state.env_u[inds].copy()
+    if len(sel_time) == 0 or np.all(np.isnan(sel_env)):
+        return jsonify({"error": "MFV-only selection contains no valid TCD data."}), 400
+
+    mean_mfv = float(np.nanmean(sel_env))
+    vessel = _current_vessel()
+
+    # Store like an MX result but with no MX, so it exports and shows in the
+    # same Mean MFV box. The table carries just the TCD samples used.
+    table = {
+        "Time_s": [round(float(t), 4) for t in sel_time],
+        "TCD": [None if np.isnan(v) else round(float(v), 4) for v in sel_env],
+        "MeanMFV": [round(mean_mfv, 4)] * len(sel_time),
+    }
+    result = {
+        "final_mx": None,
+        "mean_mfv": round(mean_mfv, 4),
+        "mfv_only": True,
+        "table": table,
+    }
+    state.ca_result = result
+    state.results["CA"][vessel] = result
+    state.log(
+        f"CA: MFV-only = {mean_mfv:.4f} over 3-min TCD epoch "
+        f"t={float(sel_time[0]):.2f}..{float(sel_time[-1]):.2f} "
+        f"({len(sel_time)} samples), stored for {vessel}."
+    )
+    _cacvr_autosave()
+
+    return jsonify({
+        "start_time": float(sel_time[0]),
+        "end_time": float(sel_time[-1]),
+        "n_samples": int(len(sel_time)),
+        "mean_mfv": round(mean_mfv, 4),
+        "vessel": vessel,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -451,7 +640,57 @@ def api_cvr_select_co2_point():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CVR – CLEAR
+#  CVR – SELECTION LIST / SELECTIVE CLEAR
+# ═══════════════════════════════════════════════════════════════════════
+
+# The four things a CVR calculation consumes. Unlike CA (one window), CVR has
+# several, so the operator can remove them one at a time instead of only being
+# able to wipe them all — mirroring the PI epoch list.
+CVR_SELECTION_KEYS = ("baseline", "hypercapnia", "co2_baseline", "co2_hypercapnia")
+
+
+def _cvr_selections_json():
+    def win(sel):
+        if not sel or "time" not in sel or len(sel["time"]) == 0:
+            return None
+        return {"start": float(sel["time"][0]), "end": float(sel["time"][-1])}
+    return {
+        "baseline": win(state.cvr_baseline),
+        "hypercapnia": win(state.cvr_hypercap),
+        "co2_baseline": state.cvr_co2_baseline,
+        "co2_hypercapnia": state.cvr_co2_hypercap,
+    }
+
+
+@app.route("/api/cvr/selections")
+def api_cvr_selections():
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    return jsonify(_cvr_selections_json())
+
+
+@app.route("/api/cvr/remove_selection", methods=["POST"])
+def api_cvr_remove_selection():
+    """Remove one CVR selection, keeping the others (selective clear)."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    which = str((request.get_json() or {}).get("which", "")).lower()
+    if which not in CVR_SELECTION_KEYS:
+        return jsonify({"error": f"which must be one of {CVR_SELECTION_KEYS}"}), 400
+    attr = {
+        "baseline": "cvr_baseline",
+        "hypercapnia": "cvr_hypercap",
+        "co2_baseline": "cvr_co2_baseline",
+        "co2_hypercapnia": "cvr_co2_hypercap",
+    }[which]
+    setattr(state, attr, None)
+    state.cvr_result = None
+    state.log(f"CVR: removed {which} selection.")
+    return jsonify(_cvr_selections_json())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CVR – CLEAR ALL
 # ═══════════════════════════════════════════════════════════════════════
 
 @app.route("/api/cvr/clear", methods=["POST"])
@@ -463,7 +702,7 @@ def api_cvr_clear():
     state.cvr_co2_baseline = None
     state.cvr_co2_hypercap = None
     state.cvr_result = None
-    state.log("CVR: selections cleared.")
+    state.log("CVR: all selections cleared.")
     return jsonify({"ok": True})
 
 
@@ -480,8 +719,7 @@ def api_cvr_calculate():
     if state.cvr_co2_baseline is None or state.cvr_co2_hypercap is None:
         return jsonify({"error": "Select a baseline and a hypercapnia CO2 point on the CO2 waveform first."}), 400
 
-    body = request.get_json() or {}
-    vessel = body.get("vessel", "MCA")
+    vessel = _current_vessel()
 
     state.log("CVR: Beginning CVR calculation...")
     result = compute_cvr(
@@ -1099,8 +1337,8 @@ def api_cacvr_next_speed():
     # Clear the working results and all selections.
     state.results = {"CA": {"MCA": None, "PCA": None}, "CVR": {"MCA": None, "PCA": None}}
     state.ca_selection = state.ca_result = None
-    state.cvr_baseline = state.cvr_hypercap = state.cvr_co2_window = None
-    state.cvr_peak_etco2 = state.cvr_peak_time = state.cvr_result = None
+    state.cvr_baseline = state.cvr_hypercap = None
+    state.cvr_co2_baseline = state.cvr_co2_hypercap = state.cvr_result = None
     state.cacvr_speed = label
 
     fname = cacvr_sessions.session_filename(state.base_name, label)
@@ -1187,12 +1425,14 @@ def api_save():
         return jsonify({"error": "Nothing to save yet — load a recording first."}), 400
 
     body = request.get_json() or {}
-    fmt = body.get("format", "excel")
+    fmt = body.get("format", "json")
 
     try:
         if fmt == "json":
-            fname = save_json(state, EXPORT_DIR)
-            state.log(f"Saved JSON: {fname}")
+            _cacvr_autosave()   # fold the current working label into the store
+            sessions = cacvr_sessions.load_all(CACVR_SESSION_DIR, state.base_name)
+            fname = save_progress_json(state, sessions, EXPORT_DIR)
+            state.log(f"Saved progress JSON: {fname} ({len(sessions)} session(s))")
         else:
             fname = save_excel(state, EXPORT_DIR)
             state.log(f"Saved Excel: {fname}")

@@ -12,8 +12,18 @@ from datetime import datetime
 
 SAMPLE_RATE = 125
 FIVE_MIN_SAMPLES = 5 * 60 * SAMPLE_RATE   # 37 500
+THREE_MIN_SAMPLES = 3 * 60 * SAMPLE_RATE  # 22 500 (MFV-only epoch)
 BASELINE_SAMPLES = 4000                     # ~32 s
 HYPERCAP_SAMPLES = 1250                     # ~10 s
+
+# Study modes. The same GUI serves both studies; the loaded file's button
+# picks the mode, which drives the label vocabulary and which controls show.
+#   RAMPs       — one visit, many LVAD speeds in one file, MCA only.
+#                 Working label is a "Speed".
+#   Serial LVAD — one visit per file over ~2 years, two vessels (MCA + PCA).
+#                 Working label is a "Vessel".
+MODE_RAMPS = "ramps"
+MODE_SERIAL = "serial_lvad"
 
 
 # ── Column-name aliases ────────────────────────────────────────────────
@@ -183,8 +193,9 @@ def find_data_column(df, signal: str):
 class SessionState:
     """Holds all state for a single loaded file."""
 
-    def __init__(self):
+    def __init__(self, study_mode: str = MODE_SERIAL):
         # metadata
+        self.study_mode: str = study_mode   # MODE_RAMPS | MODE_SERIAL
         self.patient_id: str = ""
         self.session: str = ""
         self.raw_path: str = ""
@@ -360,17 +371,32 @@ class SessionState:
             self.marks_labels = ["No marks found"]
             self.marks_times = [float("nan")]
 
-        # auto-fill patient / session from filename
+        # auto-fill patient / session from filename, per study mode
         name_only = filename.rsplit(".", 1)[0] if "." in filename else filename
         self.base_name = name_only
-        m = re.search(r"[Ll]?VAD0?(\d{2,3})", name_only)
-        self.patient_id = f"VAD0{m.group(1)}" if m else "unknownPID"
+        self.patient_id = self._auto_patient_id(name_only)
         m2 = re.search(r"[Ss]ession\s*#?\s*(\d+)", name_only, re.IGNORECASE)
         if not m2:
             m2 = re.search(r"SESSION[_ ]*(\d+)", name_only, re.IGNORECASE)
         self.session = f"Session{m2.group(1)}" if m2 else "s0"
 
-        self.log(f"Loaded {filename} — {n} rows, Patient={self.patient_id}, Session={self.session}")
+        self.log(
+            f"Loaded {filename} [{self.study_mode}] — {n} rows, "
+            f"Patient={self.patient_id}, Session={self.session}"
+        )
+
+    def _auto_patient_id(self, name_only: str) -> str:
+        """Patient ID from the filename, keyed to the study.
+
+        RAMPs: 'RAMPs001' / 'RAMP012' / 'R025' all normalise to 'R###' using
+        the number that follows the R/RAMP(s) token, zero-padded to 3 digits.
+        Serial LVAD: the existing 'VAD###' scheme.
+        """
+        if self.study_mode == MODE_RAMPS:
+            m = re.search(r"\bR(?:AMPS?)?\s*#?\s*0*(\d{1,4})", name_only, re.IGNORECASE)
+            return f"R{int(m.group(1)):03d}" if m else "unknownR"
+        m = re.search(r"[Ll]?VAD0?(\d{2,3})", name_only)
+        return f"VAD0{m.group(1)}" if m else "unknownPID"
 
     # ----- helpers to serialise numpy for JSON -----
     @staticmethod
@@ -400,6 +426,7 @@ class SessionState:
             "marks_times":  [round(t, 4) if not np.isnan(t) else None for t in self.marks_times],
             "patient_id": self.patient_id,
             "session": self.session,
+            "study_mode": self.study_mode,
             "base_name": self.base_name,
             "duration_s": float(self.time[-1]) if len(self.time) else 0.0,
             "total_samples": len(self.time),

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Serial LVAD Study</title>
+  <title>LVAD GUI</title>
   <link rel="stylesheet" href="/static/css/style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
@@ -14,22 +14,15 @@
 
   <!-- ── HEADER ── -->
   <header class="app-header">
-    <div class="logo">Serial LVAD Study <span>v10</span></div>
+    <div class="logo" id="appTitle">LVAD GUI</div>
     <div class="meta-bar">
       <div class="meta-field">
         <label>Patient</label>
         <input type="text" id="patientId" placeholder="—" disabled>
       </div>
-      <div class="meta-field">
-        <label>Session</label>
-        <input type="text" id="sessionId" placeholder="—" disabled>
-      </div>
-      <div class="meta-field">
-        <label>Vessel</label>
-        <select id="vesselSelect" disabled>
-          <option value="MCA">MCA</option>
-          <option value="PCA">PCA</option>
-        </select>
+      <div class="meta-field" id="modeBadgeField" style="display:none;">
+        <label>Study</label>
+        <span class="mode-badge" id="modeBadge">—</span>
       </div>
     </div>
   </header>
@@ -46,20 +39,63 @@
   <section id="tab-main" class="tab-panel active">
     <div class="main-grid">
 
-      <!-- load / save -->
+      <!-- load study -->
       <div class="card">
-        <div class="card-header"><h3>Load &amp; Save</h3></div>
-        <div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-          <button class="btn btn-primary" id="loadBtn">
+        <div class="card-header"><h3>Load Study</h3></div>
+        <div class="card-body">
+          <div class="load-row">
+            <button class="btn btn-primary" id="loadSerialBtn">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              Load File (.txt / .csv)
+              Load Serial LVAD Data
+            </button>
+            <button class="btn btn-primary" id="loadRampsBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Load RAMPs Data
             </button>
             <input type="file" id="fileInput" accept=".txt,.csv" style="display:none;">
-          <select id="saveFormat" class="btn" disabled>
-            <option value="excel">Save: Excel (Unified)</option>
-            <option value="json">Save: JSON (Progress)</option>
-          </select>
-          <button class="btn" id="saveBtn" disabled>Save</button>
+          </div>
+          <p class="card-note" id="loadHint">
+            Serial LVAD tags results by <b>Vessel</b> (MCA / PCA). RAMPs tags by <b>Speed</b> (MCA only).
+          </p>
+          <div class="load-row" style="margin-top:10px;">
+            <button class="btn" id="reopenBtn">Load Progress (JSON)…</button>
+            <input type="file" id="jsonInput" accept=".json" style="display:none;">
+          </div>
+        </div>
+      </div>
+
+      <!-- working session (CA + CVR) -->
+      <div class="card">
+        <div class="card-header"><h3>Working Session — CA &amp; CVR</h3></div>
+        <div class="card-body">
+          <div class="pi-field">
+            <label id="cacvrTagLabel" for="cacvrLabelInput">Vessel</label>
+            <input type="text" id="cacvrLabelInput" placeholder="MCA" disabled>
+          </div>
+          <div class="load-row" style="margin-top:8px;">
+            <button class="btn" id="cacvrLoadBtn" disabled>Load Vessel…</button>
+            <button class="btn" id="cacvrNextBtn" disabled>Save &amp; Next Vessel</button>
+          </div>
+          <p class="card-note">
+            CA and CVR are tagged and saved together. Compute on the CA and CVR tabs;
+            each tag auto-saves. Switch tags here to build up the whole study.
+          </p>
+        </div>
+      </div>
+
+      <!-- save & export -->
+      <div class="card">
+        <div class="card-header"><h3>Save &amp; Export</h3></div>
+        <div class="card-body">
+          <div class="load-row">
+            <button class="btn" id="saveProgressBtn" disabled>Save Progress (JSON)</button>
+            <button class="btn btn-primary" id="exportAllBtn" disabled>Export All Study (zip)</button>
+          </div>
+          <p class="card-note">
+            <b>Save Progress</b> writes a reopenable JSON of every tag's results.
+            <b>Export All Study</b> is the final export: master data, one workbook per
+            tag, and the JSON, zipped. (PI has its own export on the PI tab.)
+          </p>
         </div>
       </div>
 
@@ -67,11 +103,11 @@
       <div class="card">
         <div class="card-header"><h3>Instructions</h3></div>
         <div class="card-body instructions-box">
-          <strong>1.</strong> Load a raw data file (.txt or .csv comma-delimited).<br>
-          <strong>2.</strong> The <strong>CA</strong> tab lets you select a 5-minute window and compute MX index.<br>
-          <strong>3.</strong> The <strong>CVR</strong> tab lets you select baseline (~32 s) and hypercapnia (~10 s) windows, detect peak etCO2, and compute CVR.<br>
-          <strong>4.</strong> Choose <strong>MCA</strong> or <strong>PCA</strong> vessel before calculating. Repeat for both.<br>
-          <strong>5.</strong> Save results as a unified Excel workbook or JSON progress file.
+          <strong>1.</strong> Load a study with <strong>Load Serial LVAD Data</strong> or <strong>Load RAMPs Data</strong>.<br>
+          <strong>2.</strong> <strong>CA</strong> tab: select a 5-minute window and compute MX (or a 3-minute MFV-only epoch).<br>
+          <strong>3.</strong> <strong>CVR</strong> tab: select the TCD baseline/hypercapnia windows and the two CO2 points, then compute CVR.<br>
+          <strong>4.</strong> Set the <strong>Vessel</strong> (Serial LVAD) or <strong>Speed</strong> (RAMPs) tag above and <strong>Save &amp; Next</strong> to process the next one.<br>
+          <strong>5.</strong> <strong>Export All Study</strong> when the whole study is done, or <strong>Save Progress</strong> to reopen and continue later.
         </div>
       </div>
 
@@ -79,7 +115,7 @@
       <div class="card full">
         <div class="card-header"><h3>Activity Log</h3></div>
         <div class="card-body">
-          <div class="log-box" id="logBox">Session started. Load a file to begin.</div>
+          <div class="log-box" id="logBox">Session started. Load a study to begin.</div>
         </div>
       </div>
     </div>
@@ -100,8 +136,22 @@
       </div>
       <div class="controls-sidebar">
         <button class="btn btn-primary" id="caSelectBtn" disabled>Select Start (5-min)</button>
-        <button class="btn btn-danger" id="caClearBtn" disabled>Clear Selection</button>
         <button class="btn" id="caCalcBtn" disabled>Calculate MX</button>
+        <button class="btn" id="caMfvBtn" disabled>Calculate MFV only (3-min)</button>
+        <!-- MX / Mean MFV shown right under the calc buttons -->
+        <div id="caResultBox" class="hidden">
+          <div class="result-grid">
+            <div class="result-box">
+              <div class="result-label">MX Index</div>
+              <div class="result-value" id="caResultValue">—</div>
+            </div>
+            <div class="result-box">
+              <div class="result-label">Mean MFV</div>
+              <div class="result-value" id="caMeanMfv">—</div>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-danger" id="caClearBtn" disabled>Clear Selection</button>
         <div class="section-divider"></div>
         <button class="btn" id="caBrushBtn" disabled>Brush: OFF</button>
         <button class="btn btn-danger" id="caNanBtn" disabled>Replace with NaN</button>
@@ -124,28 +174,6 @@
           <div class="marks-header">Marks</div>
           <div class="marks-list" id="caMarksList"></div>
         </div>
-        <div id="caResultBox" class="hidden">
-          <div class="result-grid">
-            <div class="result-box">
-              <div class="result-label">MX Index</div>
-              <div class="result-value" id="caResultValue">—</div>
-            </div>
-            <div class="result-box">
-              <div class="result-label">Mean MFV</div>
-              <div class="result-value" id="caMeanMfv">—</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- session/speed accumulation (shared with CVR) -->
-        <div class="section-divider"></div>
-        <div class="pi-field">
-          <label for="caSessLabel">Session / Speed</label>
-          <input type="text" id="caSessLabel" class="cacvr-sess-label" placeholder="e.g. 1" disabled>
-        </div>
-        <button class="btn cacvr-load-btn" id="caLoadSessBtn" disabled>Load Session…</button>
-        <button class="btn cacvr-next-btn" id="caNextSessBtn" disabled>Save &amp; Next Session</button>
-        <button class="btn btn-primary cacvr-export-btn" id="caExportAllBtn" disabled>Export All Study (zip)</button>
       </div>
     </div>
   </section>
@@ -170,7 +198,6 @@
       <div class="controls-sidebar">
         <button class="btn btn-primary" id="cvrSelectBaseBtn" disabled>Select Baseline Start (TCD)</button>
         <button class="btn btn-primary" id="cvrSelectHypBtn" disabled>Select Hypercapnia Start (TCD)</button>
-        <div class="section-divider"></div>
         <button class="btn btn-co2base" id="cvrCo2BaseBtn" disabled>Select CO2 Baseline Point</button>
         <button class="btn btn-co2hyp" id="cvrCo2HypBtn" disabled>Select CO2 Hypercapnia Point</button>
         <div class="cvr-co2-readout" id="cvrCo2Readout">
@@ -178,9 +205,37 @@
           <span>Hypercapnia CO2: <b id="cvrCo2HypVal">—</b></span>
           <span>Delta CO2: <b id="cvrCo2Delta">—</b></span>
         </div>
+
         <div class="section-divider"></div>
-        <button class="btn btn-danger" id="cvrClearBtn" disabled>Clear Selection</button>
         <button class="btn" id="cvrCalcBtn" disabled>Calculate CVR</button>
+        <!-- printed CVR calculation values, right under the button -->
+        <div id="cvrResultBox" class="hidden">
+          <div class="result-grid">
+            <div class="result-box">
+              <div class="result-label">MCVR</div>
+              <div class="result-value" id="cvrMCVR">—</div>
+            </div>
+            <div class="result-box">
+              <div class="result-label">WCVR</div>
+              <div class="result-value" id="cvrWCVR">—</div>
+            </div>
+          </div>
+          <table class="cvr-summary-table" id="cvrSummaryTable">
+            <tr><th></th><th>MCBF</th><th>WCBF</th><th>CO2</th></tr>
+            <tr><td>Baseline</td><td id="sBaseMcbf">—</td><td id="sBaseWcbf">—</td><td id="sBaseCo2">—</td></tr>
+            <tr><td>Hypercap</td><td id="sHypMcbf">—</td><td id="sHypWcbf">—</td><td id="sHypCo2">—</td></tr>
+            <tr><td>Delta</td><td id="sDMcbf">—</td><td id="sDWcbf">—</td><td id="sDCo2">—</td></tr>
+          </table>
+        </div>
+
+        <div class="section-divider"></div>
+        <!-- selective clear: remove individual selections or all -->
+        <div class="sel-panel" id="cvrSelPanel">
+          <div class="sel-header">Selections</div>
+          <div class="sel-list" id="cvrSelList"><div class="sel-empty">No selections yet.</div></div>
+          <button class="btn btn-danger btn-sm" id="cvrClearBtn" disabled>Clear All Selections</button>
+        </div>
+
         <div class="section-divider"></div>
         <button class="btn" id="cvrBrushBtn" disabled>Brush: OFF</button>
         <button class="btn btn-danger" id="cvrNanBtn" disabled>Replace with NaN</button>
@@ -203,28 +258,6 @@
           <div class="marks-header">Marks</div>
           <div class="marks-list" id="cvrMarksList"></div>
         </div>
-        <div id="cvrResultBox" class="hidden">
-          <div class="result-grid">
-            <div class="result-box">
-              <div class="result-label">MCVR</div>
-              <div class="result-value" id="cvrMCVR">—</div>
-            </div>
-            <div class="result-box">
-              <div class="result-label">WCVR</div>
-              <div class="result-value" id="cvrWCVR">—</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- session/speed accumulation (shared with CA) -->
-        <div class="section-divider"></div>
-        <div class="pi-field">
-          <label for="cvrSessLabel">Session / Speed</label>
-          <input type="text" id="cvrSessLabel" class="cacvr-sess-label" placeholder="e.g. 1" disabled>
-        </div>
-        <button class="btn cacvr-load-btn" id="cvrLoadSessBtn" disabled>Load Session…</button>
-        <button class="btn cacvr-next-btn" id="cvrNextSessBtn" disabled>Save &amp; Next Session</button>
-        <button class="btn btn-primary cacvr-export-btn" id="cvrExportAllBtn" disabled>Export All Study (zip)</button>
       </div>
     </div>
   </section>
