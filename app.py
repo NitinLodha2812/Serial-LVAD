@@ -878,7 +878,8 @@ def _pi_autosave():
         "epochs": state.pi_epochs,
     }
     try:
-        return pi_analysis.save_session(PI_SESSION_DIR, state.base_name, state.pi_speed, payload)
+        return pi_analysis.save_session(
+            PI_SESSION_DIR, state.base_name, state.pi_speed, state.pi_vessel, payload)
     except Exception as e:
         state.log(f"PI: WARNING — auto-save failed: {e}")
         return None
@@ -908,15 +909,34 @@ def api_pi_state():
 
 @app.route("/api/pi/meta", methods=["POST"])
 def api_pi_meta():
-    """Update the PI tab's Session/Speed and Vessel fields."""
+    """
+    Update the PI tab's Speed and Vessel fields.
+
+    Speed and Vessel together identify a saved PI set (so MCA and PCA can both
+    be kept for a Serial LVAD recording). If the operator changes either to a
+    NEW value while beats are already selected, those beats belong to the OLD
+    (speed, vessel): persist them, then start a fresh set so the new identity
+    doesn't inherit the previous vessel's/speed's beats. `switched` tells the
+    frontend the working set was cleared.
+    """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
     body = request.get_json() or {}
-    if "speed" in body:
-        state.pi_speed = str(body["speed"]).strip()
-    if "vessel" in body:
-        state.pi_vessel = str(body["vessel"]).strip()
-    return jsonify({"ok": True, "speed": state.pi_speed, "vessel": state.pi_vessel})
+    new_speed = str(body.get("speed", state.pi_speed)).strip()
+    new_vessel = str(body.get("vessel", state.pi_vessel)).strip()
+    changed = (new_speed != state.pi_speed) or (new_vessel != state.pi_vessel)
+
+    switched = False
+    if changed and state.pi_epochs:
+        _pi_autosave()               # save the outgoing (speed, vessel) first
+        state.pi_epochs = []         # then start the new identity clean
+        state.pi_next_id = 1
+        switched = True
+
+    state.pi_speed = new_speed
+    state.pi_vessel = new_vessel
+    return jsonify({"ok": True, "speed": state.pi_speed, "vessel": state.pi_vessel,
+                    "switched": switched})
 
 
 @app.route("/api/pi/select", methods=["POST"])
@@ -1131,7 +1151,7 @@ def api_pi_next_speed():
 
     state.pi_epochs = []
     state.pi_speed = speed
-    fname = pi_analysis.session_filename(state.base_name, speed)
+    fname = pi_analysis.session_filename(state.base_name, speed, state.pi_vessel)
     existing = os.path.isfile(os.path.join(PI_SESSION_DIR, fname))
     state.log(f"PI: ready for speed {speed!r}. Existing selections: {existing}")
     return jsonify({
@@ -1185,6 +1205,37 @@ def api_pi_export():
         f"artificial epoch(s) to {fname}"
     )
     return jsonify({"filename": fname, "summary": summary})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ABP SOURCE — manual override of the auto-resolved fiABP/A-LINE/reABP
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.route("/api/abp/source", methods=["POST"])
+def api_abp_source():
+    """
+    Switch which raw column fills the ABP signal. `index` must be one of the
+    candidates the loader found. Returns the decimated ABP for replotting; the
+    CA MX and the Master export pick up the new column on their next run.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    try:
+        index = int(body["index"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "index (integer) is required"}), 400
+    if not any(c["index"] == index for c in state.abp_candidates):
+        return jsonify({"error": "That column is not an available ABP source."}), 400
+
+    header = state.set_abp_source(index)
+    state.log(f"ABP source switched to column {index} ({header!r}).")
+    return jsonify({
+        "abp_source": header,
+        "abp_source_index": index,
+        # decimated to match the overview plots (same 50x as get_overview_json)
+        "abp": state._to_list(state.abp, 50),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1377,23 +1428,27 @@ def api_cacvr_load_session():
 @app.route("/api/cacvr/export_all", methods=["POST"])
 def api_cacvr_export_all():
     """
-    One-shot study export: master workbook (once) + one workbook per saved
-    session/speed + a JSON progress file, bundled into a single zip. PI is
-    exported separately and is not included here.
+    One-shot study export (mode-aware): master workbook (once) + the CA/CVR/PI
+    workbooks + a JSON progress file, zipped. Serial LVAD -> one workbook per
+    session with MCA/PCA CA/CVR/PI tabs; RAMPs -> one workbook per speed with
+    CA/CVR/PI tabs. The standalone PI Demographics export is separate.
     """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
 
-    _cacvr_autosave()   # fold in the current working session
+    _cacvr_autosave()   # fold in the current working CA/CVR session
+    if state.pi_epochs:
+        _pi_autosave()  # and the current working PI selections
     sessions = cacvr_sessions.load_all(CACVR_SESSION_DIR, state.base_name)
-    if not sessions:
+    pi_sessions = pi_analysis.load_all(PI_SESSION_DIR, state.base_name)
+    if not sessions and not pi_sessions:
         return jsonify({"error": (
-            "No CA/CVR results saved yet. Calculate MX or CVR for at least one "
-            "session/speed first."
+            "Nothing to export yet. Calculate MX/CVR or select PI beats for at "
+            "least one vessel/speed first."
         )}), 400
 
     try:
-        zip_name, manifest = export_all_cacvr(state, sessions, EXPORT_DIR)
+        zip_name, manifest = export_all_cacvr(state, sessions, pi_sessions, EXPORT_DIR)
     except Exception as e:
         import traceback
         print(f"CA/CVR export error:\n{traceback.format_exc()}")

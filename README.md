@@ -22,9 +22,11 @@ From a raw recording sampled at **125 Hz**, the app computes:
 - **PI** — Pulsatility Index per beat epoch, for **native** (heart-driven) vs
   **artificial** (pump-driven) beats. Ported from the separate MATLAB `PI.m`.
 
-CA and CVR are tagged, accumulated, and exported together from one place on the
-Main screen. PI keeps its own separate export. A run can be saved to a JSON
-progress file and reopened later to continue.
+CA, CVR, and PI are tagged, accumulated, and exported together from one place on
+the Main screen (Serial LVAD gets one 6-tab workbook per session; RAMPs gets one
+3-tab workbook per speed). PI also keeps its own separate `PI Demographics`
+export. A run can be saved to a JSON progress file and reopened later to
+continue.
 
 ---
 
@@ -281,26 +283,40 @@ controls live in one place on the **Main screen** (not on the CA/CVR tabs):
 4. **Save Progress (JSON)** at any time writes a small, reopenable snapshot of
    every tag's results.
 5. When the whole study is done, **Export All Study (zip)** produces a single
-   download containing:
-   - one **`*_Master.xlsx`** — the raw data with all edits, written **once**;
-   - one **`<patient>_<tag>.xlsx`** per tag, each with the CA and CVR sheets;
-   - one **`*_progress.json`** — a reloadable snapshot of everything.
+   download whose workbook layout depends on the study:
+   - **Serial LVAD** — **one workbook for the session** (each session is its own
+     recording), with up to **6 tabs**: `MCA_CA`, `MCA_CVR`, `MCA_PI`, `PCA_CA`,
+     `PCA_CVR`, `PCA_PI` (fewer if a vessel or analysis wasn't collected).
+   - **RAMPs** — **one workbook per speed**, each with up to **3 tabs**: `CA`,
+     `CVR`, `PI`.
+   - plus one **`*_Master.xlsx`** (raw data + edits, written **once**; skipped
+     after a JSON reopen with no raw data) and one **`*_progress.json`**.
 
-Because the giant Master sheet is written a single time rather than per save,
-exporting a multi-tag study is much faster. The PI tab keeps its **own**
-separate `PI Demographics` export and is not part of this bundle.
+**PI is now part of this export** alongside CA and CVR. Each PI tab lists **one
+row per beat** — `Beat`, `Type`, `Start_s`, `End_s`, `Max`, `Min`, `Mean`,
+`PW_s`, `PI` — mirroring the on-screen PI table. For Serial LVAD, PI is split
+into `MCA_PI` / `PCA_PI` by the PI tab's **Vessel**; for RAMPs, PI is matched to
+each speed. The CVR tab is a compact metric/value table of the computed values.
+
+The standalone **PI Demographics** export (the **Export to Excel** button on the
+PI tab, one wide row per participant) is **kept unchanged** and is separate from
+this bundle.
+
+> On the PI tab, changing the **Speed** or **Vessel** while beats are selected
+> saves the current set under the old speed/vessel and starts a fresh one, so
+> MCA and PCA (or different speeds) never share beats.
 
 ### Reopening a saved study
 
 **Load Progress (JSON)…** on the Main screen reopens a previously saved progress
 file (from **Save Progress** or the JSON inside an **Export All** zip) and
 restores every tag's results, so you can review them, load a tag, or re-export —
-the same idea as reopening in the PI GUI. The raw waveform is **not** stored in
-the JSON, so the plots stay empty until you load the original recording; because
-the restored tags are keyed by the recording's name, loading that recording
-afterwards lines them straight back up. (Reopening a raw `.txt`/`.csv` still goes
-through the two **Load … Data** buttons; the Excel files are not used for
-reopening.)
+the same idea as reopening in the PI GUI. It reads current and older progress
+files, and infers the study (RAMPs vs Serial LVAD) from files saved before study
+modes existed. The raw waveform is **not** stored in the JSON, so the plots stay
+empty until you load the original recording; because the restored tags are keyed
+by the recording's name, loading that recording afterwards lines them straight
+back up. (The Excel files are **not** used for reopening — only the JSON.)
 
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*
@@ -314,6 +330,12 @@ Beyond scroll-to-zoom (X) and **Shift+drag** to pan, each tab has a control row:
   the X window** (handy for making a beat taller to inspect it).
 - **◀ / ▶** — slide the visible window left/right **keeping its width** (shift
   the zoomed-in region without zooming out and back in).
+
+**ABP source** — the ABP plot (CA tab) and the fiABP/reABP plot (PI tab) fill
+automatically from the best available column (fiABP → A-LINE → reABP by data
+coverage). To override it, use the small **dropdown built into the plot title**
+(no extra button): pick `fiABP`, `A-LINE`, or `reABP`. Both ABP plots stay in
+sync; re-run **Calculate MX** to recompute with the chosen source.
 
 On the PI tab both plots stay X-synced as you zoom or pan.
 

@@ -407,6 +407,14 @@ class CACharts {
 
   _charts() { return [this.chart1, this.chart2].filter(Boolean); }
 
+  // Replace the ABP trace (chart2) after the source column is switched.
+  setAbp(abpArr) {
+    if (!this.chart2 || !this.data) return;
+    this.data.abp = abpArr;
+    this.chart2.data.datasets[0].data = xyData(this.data.time, abpArr);
+    this.chart2.update('none');
+  }
+
   // ── brush API used by app.js ──
   setBrushMode(on) {
     setChartBrushMode(this.chart1, on);

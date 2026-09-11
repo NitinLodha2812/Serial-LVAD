@@ -170,6 +170,7 @@ $('fileInput').addEventListener('change', async (e) => {
     enableMainSave(true);
     updateStatus(true);
 
+    initAbpSource(sessionData);
     await initPITab();
     await initCacvrSession();
 
@@ -239,6 +240,59 @@ $('patientId').addEventListener('change', async () => {
   try { await api('/api/metadata', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ patient_id: $('patientId').value }) }); } catch {}
   appendLog('Patient ID updated to: ' + $('patientId').value);
 });
+
+
+/* ═══════════════════════ ABP SOURCE (plot-title dropdown) ═══════════════════════
+   The ABP plot auto-fills from the resolved column (fiABP → A-LINE → reABP);
+   these dropdowns, built into the CA and PI ABP plot titles, let the user
+   override it without adding buttons to the sidebar. */
+
+const ABP_SELECT_IDS = ['caAbpSource', 'piAbpSource'];
+
+function initAbpSource(data) {
+  const sources = data.abp_sources || [];
+  const cur = data.abp_source_index;
+  ABP_SELECT_IDS.forEach(id => {
+    const sel = $(id);
+    sel.innerHTML = '';
+    if (!sources.length) {
+      const o = document.createElement('option');
+      o.textContent = 'no ABP source'; o.value = '';
+      sel.appendChild(o); sel.disabled = true;
+      return;
+    }
+    sources.forEach(s => {
+      const o = document.createElement('option');
+      o.value = String(s.index);
+      o.textContent = s.header;
+      sel.appendChild(o);
+    });
+    if (cur != null) sel.value = String(cur);
+    sel.disabled = false;
+    sel.onchange = () => switchAbpSource(parseInt(sel.value, 10));
+  });
+}
+
+async function switchAbpSource(index) {
+  if (!Number.isFinite(index)) return;
+  showLoading();
+  try {
+    const r = await api('/api/abp/source', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    });
+    caCharts.setAbp(r.abp);          // CA ABP plot
+    if (sessionData) sessionData.abp = r.abp;
+    await refreshPITrace();          // PI ABP plot re-fetches (reads state.abp)
+    ABP_SELECT_IDS.forEach(id => { $(id).value = String(r.abp_source_index); });
+    appendLog(`ABP source switched to ${r.abp_source}. (Re-run Calculate MX to use it.)`);
+    toast(`ABP source: ${r.abp_source}`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('ABP source error: ' + err.message);
+  }
+  hideLoading();
+}
 
 
 /* ═══════════════════════ REOPEN PROGRESS (JSON) ═══════════════════════ */
@@ -877,11 +931,18 @@ async function initPITab() {
 /* ── metadata fields ── */
 async function pushPIMeta() {
   try {
-    await api('/api/pi/meta', {
+    const r = await api('/api/pi/meta', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ speed: $('piSpeed').value, vessel: $('piVessel').value }),
     });
+    // Changing Speed/Vessel with beats already selected saves the old set and
+    // starts a fresh one; reflect that cleared state in the plot + table.
+    if (r.switched) {
+      renderPI(await api('/api/pi/state'));
+      appendLog(`PI: saved previous set; started a fresh set for speed "${r.speed}", vessel "${r.vessel}".`);
+      toast('Saved previous PI set; started a new one', 'info');
+    }
   } catch (err) { appendLog('PI meta error: ' + err.message); }
 }
 $('piSpeed').addEventListener('change', pushPIMeta);
@@ -1009,7 +1070,9 @@ function openSpeedModal(sessions) {
   list.innerHTML = '';
   sessions.forEach(s => {
     const btn = document.createElement('button');
-    btn.innerHTML = `<strong>${s.speed ? 'Speed ' + s.speed : '(no speed label)'}</strong>` +
+    const parts = [s.speed ? 'Speed ' + s.speed : null, s.vessel || null].filter(Boolean);
+    const title = parts.length ? parts.join(' · ') : '(no speed/vessel)';
+    btn.innerHTML = `<strong>${title}</strong>` +
       `<span class="speed-meta">${s.n_native} native · ${s.n_artificial} artificial · ${s.filename}</span>`;
     btn.addEventListener('click', () => { closeSpeedModal(); loadPISession(s.filename); });
     list.appendChild(btn);

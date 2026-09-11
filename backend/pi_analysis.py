@@ -217,27 +217,33 @@ def _safe(part: str) -> str:
     return re.sub(r"[^\w.\-]", "_", (part or "").strip())
 
 
-def session_filename(base_name: str, speed: str) -> str:
-    speed = _safe(speed)
+def session_filename(base_name: str, speed: str, vessel: str = "") -> str:
+    """
+    One file per (recording, speed, vessel). Vessel is part of the key so a
+    Serial LVAD recording can hold both MCA and PCA PI at the same (often empty)
+    speed without one overwriting the other.
+    """
     stem = _safe(base_name) or "recording"
-    return f"{stem}__speed{speed}.json" if speed else f"{stem}__nospeed.json"
+    sp = _safe(speed) or "nospeed"
+    ve = _safe(vessel) or "novessel"
+    return f"{stem}__pi__{sp}__{ve}.json"
 
 
 def speed_from_filename(base_name: str, filename: str) -> str:
-    """Recover the speed label a session file was saved under."""
+    """Recover the speed label from a filename (fallback; payloads carry it)."""
     stem = filename[:-5] if filename.endswith(".json") else filename
-    prefix = f"{_safe(base_name)}__"
-    if stem.startswith(prefix):
-        stem = stem[len(prefix):]
-    if stem == "nospeed":
-        return ""
-    return stem[5:] if stem.startswith("speed") else stem
+    parts = stem.split("__")
+    # …__pi__<speed>__<vessel>
+    if len(parts) >= 4 and parts[-3] == "pi":
+        sp = parts[-2]
+        return "" if sp == "nospeed" else sp
+    return ""
 
 
-def save_session(session_dir: str, base_name: str, speed: str, payload: dict) -> str:
-    """Write selections for one speed. Called after every mutation (auto-save)."""
+def save_session(session_dir: str, base_name: str, speed: str, vessel: str, payload: dict) -> str:
+    """Write selections for one (speed, vessel). Called after every mutation."""
     os.makedirs(session_dir, exist_ok=True)
-    fname = session_filename(base_name, speed)
+    fname = session_filename(base_name, speed, vessel)
     with open(os.path.join(session_dir, fname), "w") as f:
         json.dump(payload, f, indent=2, allow_nan=False)
     return fname
@@ -250,13 +256,12 @@ def load_session(session_dir: str, filename: str) -> dict:
 
 def list_sessions(session_dir: str, base_name: str) -> list:
     """
-    Every saved speed for this recording, newest-name-last. Each entry carries
-    the speed label and epoch counts so the UI can label the picker without
-    re-reading each file.
+    Every saved (speed, vessel) for this recording. Each entry carries the
+    speed and vessel labels and epoch counts so the picker can label itself.
     """
     if not os.path.isdir(session_dir):
         return []
-    pattern = os.path.join(session_dir, f"{_safe(base_name)}__*.json")
+    pattern = os.path.join(session_dir, f"{_safe(base_name)}__pi__*.json")
     out = []
     for path in sorted(glob.glob(pattern)):
         fname = os.path.basename(path)
@@ -273,4 +278,15 @@ def list_sessions(session_dir: str, base_name: str) -> list:
             "n_native": sum(1 for e in epochs if e["type"] == NATIVE),
             "n_artificial": sum(1 for e in epochs if e["type"] == ARTIFICIAL),
         })
+    return out
+
+
+def load_all(session_dir: str, base_name: str) -> list:
+    """Full PI session payloads (with epochs) for this recording, for export."""
+    out = []
+    for meta in list_sessions(session_dir, base_name):
+        try:
+            out.append(load_session(session_dir, meta["filename"]))
+        except (OSError, ValueError):
+            continue
     return out

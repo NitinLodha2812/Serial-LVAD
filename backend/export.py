@@ -8,7 +8,7 @@ import json, os, re, shutil, tempfile, zipfile
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from .session_state import SessionState, SAMPLE_RATE
+from .session_state import SessionState, SAMPLE_RATE, MODE_RAMPS, MODE_SERIAL
 from . import pi_analysis
 
 # Sheet PI.m reads from and writes back to.
@@ -99,12 +99,26 @@ def parse_progress_payload(data: dict) -> dict:
     """
     patient_id = data.get("patient_id", "") or ""
     session = data.get("session", "") or ""
-    study_mode = data.get("study_mode") or "serial_lvad"
+
     base_name = data.get("base_name") or ""
     if not base_name:
-        raw = data.get("raw_path") or ""
-        stem = os.path.splitext(os.path.basename(raw))[0] if raw else ""
+        # raw_path may be a Windows path from another machine; split on both
+        # separators so we recover just the file stem (which is the base_name a
+        # fresh load of the same recording would produce).
+        raw = (data.get("raw_path") or "").replace("\\", "/")
+        stem = os.path.splitext(raw.rsplit("/", 1)[-1])[0] if raw else ""
         base_name = stem or f"{patient_id}_{session}".strip("_") or "reopened"
+
+    # Legacy files (before study modes) carry no study_mode — infer it. RAMPs
+    # patient ids look like R###, and RAMPs sessions/labels say "Speed".
+    study_mode = data.get("study_mode")
+    if study_mode not in ("ramps", "serial_lvad"):
+        cs = data.get("cacvr_sessions")
+        labels = ([s.get("label", "") for s in cs] if isinstance(cs, list)
+                  else list(cs.keys()) if isinstance(cs, dict) else [])
+        hay = " ".join([patient_id, session, base_name, *labels]).lower()
+        is_r = re.match(r"\s*r\d", patient_id.strip(), re.IGNORECASE) is not None
+        study_mode = "ramps" if (is_r or "speed" in hay) else "serial_lvad"
 
     sessions = []
     cs = data.get("cacvr_sessions")
@@ -195,6 +209,97 @@ def _write_marks_sheet(writer, state: SessionState):
         }).to_excel(writer, sheet_name="Marks", index=False)
 
 
+# ── per-analysis frames for the study export (one tab each) ──────────────
+
+_CVR_SUMMARY_ORDER = [
+    ("base_mcbf", "Baseline MCBF"), ("base_wcbf", "Baseline WCBF"), ("base_co2", "Baseline CO2"),
+    ("hyp_mcbf", "Hypercapnia MCBF"), ("hyp_wcbf", "Hypercapnia WCBF"), ("hyp_co2", "Hypercapnia CO2"),
+    ("delta_mcbf", "Delta MCBF"), ("delta_wcbf", "Delta WCBF"), ("delta_co2", "Delta CO2"),
+    ("mcvr", "MCVR"), ("wcvr", "WCVR"),
+    ("base_co2_time", "Baseline CO2 time (s)"), ("hyp_co2_time", "Hypercapnia CO2 time (s)"),
+]
+
+
+def _ca_frame(ca: dict):
+    """CA tab = the per-window CA table (Time/TCD/ABP/MAP/MFV/Corr/MX/MeanMFV)."""
+    if ca and ca.get("table"):
+        return pd.DataFrame(ca["table"])
+    return None
+
+
+def _cvr_frame(cvr: dict):
+    """CVR tab = one compact key/value table of the computed values."""
+    if not cvr:
+        return None
+    s = cvr.get("summary") if isinstance(cvr, dict) and "summary" in cvr else cvr
+    s = s or {}
+    rows = [{"Metric": label, "Value": s.get(key)}
+            for key, label in _CVR_SUMMARY_ORDER if s.get(key) is not None]
+    return pd.DataFrame(rows, columns=["Metric", "Value"]) if rows else None
+
+
+def pi_epochs_frame(epochs: list):
+    """PI tab = one row per beat, columns for the metrics (as in the PI table)."""
+    if not epochs:
+        return None
+    rows = []
+    for e in pi_analysis.numbered(epochs):
+        native = e["type"] == pi_analysis.NATIVE
+        rows.append({
+            "Beat": ("Native #" if native else "Artificial #") + str(e["ordinal"]),
+            "Type": "Native" if native else "Artificial",
+            "Start_s": e.get("t_start"), "End_s": e.get("t_end"),
+            "Max": e.get("max"), "Min": e.get("min"), "Mean": e.get("mean"),
+            "PW_s": e.get("pw"), "PI": e.get("pi"),
+        })
+    cols = ["Beat", "Type", "Start_s", "End_s", "Max", "Min", "Mean", "PW_s", "PI"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _workbook_from_frames(path: str, frames: list) -> int:
+    """Write (sheet_name, dataframe) pairs; skip None frames. Returns tab count."""
+    frames = [(n, df) for (n, df) in frames if df is not None and not df.empty]
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        for name, df in frames:
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+        if not frames:
+            pd.DataFrame({"note": ["no results in this workbook"]}).to_excel(
+                writer, sheet_name="empty", index=False)
+    return len(frames)
+
+
+def _merge_cacvr_by_vessel(cacvr_sessions: list) -> dict:
+    """Collapse all tags into per-vessel CA/CVR (first non-null wins). Robust to
+    the tag being the vessel (clean data) or messy legacy labels."""
+    out = {"MCA": {"CA": None, "CVR": None}, "PCA": {"CA": None, "CVR": None}}
+    for s in cacvr_sessions:
+        r = s.get("results", {}) or {}
+        for v in ("MCA", "PCA"):
+            if out[v]["CA"] is None and (r.get("CA") or {}).get(v):
+                out[v]["CA"] = r["CA"][v]
+            if out[v]["CVR"] is None and (r.get("CVR") or {}).get(v):
+                out[v]["CVR"] = r["CVR"][v]
+    return out
+
+
+def _pi_epochs_by_vessel(pi_sessions: list) -> dict:
+    out = {"MCA": [], "PCA": []}
+    for p in pi_sessions:
+        v = (p.get("vessel") or "").strip().upper()
+        if v in out:
+            out[v].extend(p.get("epochs", []) or [])
+    return out
+
+
+def _pi_epochs_for_speed(pi_sessions: list, speed: str) -> list:
+    target = (speed or "").strip().lower()
+    epochs = []
+    for p in pi_sessions:
+        if (p.get("speed") or "").strip().lower() == target:
+            epochs.extend(p.get("epochs", []) or [])
+    return epochs
+
+
 def save_excel(state: SessionState, out_dir: str) -> str:
     """
     Legacy single-shot unified workbook (Master + CA + CVR + Marks) for the
@@ -231,16 +336,18 @@ def save_session_excel(results: dict, path: str) -> int:
     return n
 
 
-def export_all_cacvr(state: SessionState, sessions: list, out_dir: str):
+def export_all_cacvr(state: SessionState, cacvr_sessions: list, pi_sessions: list, out_dir: str):
     """
-    Bundle the whole study into one download:
-      <patient>_<ts>_Master.xlsx   — raw data + edits, ONCE
-      <patient>_<label>.xlsx       — CA+CVR sheets, one per saved session/speed
-      <patient>_<ts>_progress.json — reloadable snapshot of everything (redo net)
-    all zipped together. PI is exported separately by design.
+    Bundle the whole study into one zip. Workbook layout is mode-specific:
 
-    `sessions` is the list of saved session payloads (from cacvr_sessions),
-    each a dict with "label" and serialised "results".
+      Serial LVAD — ONE workbook per session (the recording), up to 6 tabs:
+                    MCA_CA, MCA_CVR, MCA_PI, PCA_CA, PCA_CVR, PCA_PI
+                    (fewer if a vessel/analysis wasn't collected).
+      RAMPs       — ONE workbook per speed, up to 3 tabs: CA, CVR, PI.
+
+    Plus a `*_Master.xlsx` (raw data + edits, written once, skipped after a
+    JSON reopen with no raw data) and a `*_progress.json`. The standalone
+    "PI Demographics" workbook is separate and unaffected.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     patient = _safe_stem(state.patient_id) or "patient"
@@ -248,27 +355,49 @@ def export_all_cacvr(state: SessionState, sessions: list, out_dir: str):
     workdir = tempfile.mkdtemp()
     manifest = []
     try:
-        # The master needs the raw recording. After a JSON reopen there is no
-        # raw data, so skip it rather than write an empty sheet.
         if state.raw_headers and state.raw_rows:
             master_name = f"{base}_Master.xlsx"
             save_master_excel(state, os.path.join(workdir, master_name))
             manifest.append(master_name)
 
         used = set()
-        for s in sessions:
-            label = _safe_stem(s.get("label")) or "session"
-            sname = f"{patient}_{label}.xlsx"
-            # Guard against two labels colliding after sanitisation.
-            i = 2
-            while sname in used:
-                sname = f"{patient}_{label}_{i}.xlsx"; i += 1
-            used.add(sname)
-            save_session_excel(s.get("results", {}), os.path.join(workdir, sname))
-            manifest.append(sname)
+
+        def unique(name):
+            out, i = name, 2
+            while out in used:
+                out = name[:-5] + f"_{i}.xlsx"; i += 1
+            used.add(out)
+            return out
+
+        if state.study_mode == MODE_RAMPS:
+            # One workbook per speed (tag), tabs CA / CVR / PI (MCA-only study).
+            for s in cacvr_sessions:
+                label = s.get("label") or ""
+                r = s.get("results", {}) or {}
+                frames = [
+                    ("CA",  _ca_frame((r.get("CA") or {}).get("MCA"))),
+                    ("CVR", _cvr_frame((r.get("CVR") or {}).get("MCA"))),
+                    ("PI",  pi_epochs_frame(_pi_epochs_for_speed(pi_sessions, label))),
+                ]
+                wbname = unique(f"{patient}_{_safe_stem(label) or 'speed'}.xlsx")
+                _workbook_from_frames(os.path.join(workdir, wbname), frames)
+                manifest.append(wbname)
+        else:
+            # Serial LVAD: one workbook for the session, MCA/PCA × CA/CVR/PI.
+            vessels = _merge_cacvr_by_vessel(cacvr_sessions)
+            pis = _pi_epochs_by_vessel(pi_sessions)
+            frames = []
+            for v in ("MCA", "PCA"):
+                frames.append((f"{v}_CA",  _ca_frame(vessels[v]["CA"])))
+                frames.append((f"{v}_CVR", _cvr_frame(vessels[v]["CVR"])))
+                frames.append((f"{v}_PI",  pi_epochs_frame(pis[v])))
+            sess = _safe_stem(state.session) or "session"
+            wbname = unique(f"{patient}_{sess}.xlsx")
+            _workbook_from_frames(os.path.join(workdir, wbname), frames)
+            manifest.append(wbname)
 
         json_name = f"{base}_progress.json"
-        _write_progress_json(state, sessions, os.path.join(workdir, json_name))
+        _write_progress_json(state, cacvr_sessions, os.path.join(workdir, json_name))
         manifest.append(json_name)
 
         zip_name = f"{base}_export.zip"

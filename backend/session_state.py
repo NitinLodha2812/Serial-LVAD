@@ -216,6 +216,10 @@ class SessionState:
         self.etco2: np.ndarray = np.array([])
         self.co2: np.ndarray = np.array([])   # raw CO2 waveform (per-sample)
 
+        # ABP source selection (fiABP / A-LINE / reABP …)
+        self.abp_candidates: list = []        # [{index, header, coverage}, ...]
+        self.abp_source_index: int | None = None
+
         # marks
         self.marks_labels: list = []
         self.marks_times: list = []       # float seconds
@@ -347,6 +351,27 @@ class SessionState:
         self.co2    = safe_col(resolved.get("co2"))
         self.abp    = safe_col(resolved["abp"])
 
+        # Every ABP-like column that actually carries data, in alias-priority
+        # order (fiABP, A-LINE, reABP/other). The plot auto-fills from the
+        # resolved one but the user can switch among these later.
+        norm = [_normalize_header(h) for h in self.raw_headers]
+        cands = []
+        for pattern in COLUMN_ALIASES.get("abp", []):
+            for i, nh in enumerate(norm):
+                if pattern in nh and not any(c["index"] == i for c in cands):
+                    arr = safe_col(i)
+                    if _column_coverage(arr) > 0.0:
+                        cands.append({"index": i, "header": self.raw_headers[i],
+                                      "coverage": round(_column_coverage(arr), 3)})
+        # Ensure the resolved column is present (it may be a positional fallback
+        # that didn't match an alias) and marked current.
+        if resolved["abp"] is not None and not any(c["index"] == resolved["abp"] for c in cands):
+            cands.insert(0, {"index": int(resolved["abp"]),
+                             "header": self.raw_headers[resolved["abp"]],
+                             "coverage": round(_column_coverage(self.abp), 3)})
+        self.abp_candidates = cands
+        self.abp_source_index = resolved["abp"]
+
         # parse marks – locate by name ("mark"), else fall back to last column
         mark_col_idx = find_column(self.raw_headers, "mark")
         if mark_col_idx is None:
@@ -398,6 +423,26 @@ class SessionState:
         m = re.search(r"[Ll]?VAD0?(\d{2,3})", name_only)
         return f"VAD0{m.group(1)}" if m else "unknownPID"
 
+    def set_abp_source(self, index: int) -> str:
+        """
+        Re-fill the ABP signal from a chosen raw column (manual override of the
+        auto-resolved source). Reloads that column fresh from the raw rows, so
+        any prior NaN brushing on ABP is dropped. Also updates column_positions
+        so the Master export writes back to the right column. Returns the header.
+        """
+        import pandas as pd
+        n = len(self.time)
+        col = pd.to_numeric(
+            pd.Series([r[index] if index < len(r) else None for r in self.raw_rows]),
+            errors="coerce").to_numpy(dtype=np.float64)
+        if len(col) != n:
+            col = np.resize(col, n)
+        self.abp = col
+        self.abp_source_index = index
+        if isinstance(self.column_positions, dict):
+            self.column_positions["abp"] = index
+        return self.raw_headers[index]
+
     # ----- helpers to serialise numpy for JSON -----
     @staticmethod
     def _to_list(arr, decimate=1):
@@ -435,6 +480,8 @@ class SessionState:
             "abp_source": (self.raw_headers[self.column_positions["abp"]]
                            if self.column_positions.get("abp") is not None
                            else None),
+            "abp_sources": list(self.abp_candidates),
+            "abp_source_index": self.abp_source_index,
         }
 
     def get_range_json(self, start_sec: float, end_sec: float):

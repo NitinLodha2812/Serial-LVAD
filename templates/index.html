@@ -130,7 +130,10 @@
           <div class="plot-wrap"><canvas id="caPlot1"></canvas></div>
         </div>
         <div class="plot-card">
-          <div class="plot-title">ABP (mmHg)</div>
+          <div class="plot-title">
+            <select class="title-select" id="caAbpSource" title="ABP source column" disabled></select>
+            <span class="title-unit">(mmHg)</span>
+          </div>
           <div class="plot-wrap"><canvas id="caPlot2"></canvas></div>
         </div>
       </div>
@@ -275,8 +278,8 @@
         </div>
         <div class="plot-card">
           <div class="plot-title">
-            fiABP / reABP — same window
-            <span class="plot-hint">selected beats shaded · X-synced to TCD ·
+            <select class="title-select" id="piAbpSource" title="ABP source column" disabled></select>
+            <span class="plot-hint">same window · X-synced to TCD ·
               <span class="timing-flag">timing offset TBD</span></span>
           </div>
           <div class="plot-wrap short"><canvas id="piPlotAbp"></canvas></div>
