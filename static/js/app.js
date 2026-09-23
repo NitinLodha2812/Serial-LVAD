@@ -985,6 +985,18 @@ function renderPI(payload) {
   $('piNativePI').textContent = 'PI ' + fmt(s.mean_pi_native);
   $('piArtificialPI').textContent = 'PI ' + fmt(s.mean_pi_artificial);
 
+  // Running averages over all selected beats (auto-updates on every change).
+  const av = (cls, m) => (s['avg_' + cls] || {})[m];
+  const fillAvg = (cls, suffix) => {
+    $('avg' + suffix + 'Hi').textContent = fmt(av(cls, 'max'));
+    $('avg' + suffix + 'Lo').textContent = fmt(av(cls, 'min'));
+    $('avg' + suffix + 'Mean').textContent = fmt(av(cls, 'mean'));
+    $('avg' + suffix + 'Pa').textContent = fmt(av(cls, 'pulse_amp'));
+    $('avg' + suffix + 'Pi').textContent = fmt(av(cls, 'pi'), 3);
+  };
+  fillAvg('native', 'Nat');
+  fillAvg('artificial', 'Art');
+
   const shift = payload.abp_shift || 0;
   $('piSyncShift').textContent = shift.toFixed(3) + ' s';
   $('piAbpSyncNote').textContent = shift ? `(shift ${shift >= 0 ? '+' : ''}${shift.toFixed(3)} s)`

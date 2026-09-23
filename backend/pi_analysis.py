@@ -133,13 +133,22 @@ def auto_mark_points(start: float, x_min: float, x_max: float,
 #  SUMMARY
 # ═══════════════════════════════════════════════════════════════════════
 
+AVG_KEYS = ("max", "min", "mean", "pulse_amp", "pi")
+
+
 def _mean_of(values):
     vals = [v for v in values if v is not None]
     return round(float(np.mean(vals)), 4) if vals else None
 
 
+def average_metrics(items: list) -> dict:
+    """Running average of each metric over a set of beats (Hi/Lo/Mean/PA/PI)."""
+    return {k: _mean_of(e.get(k) for e in items) for k in AVG_KEYS}
+
+
 def summarize(epochs: list) -> dict:
-    """Counts and mean PI per class — what the GUI's counter displays."""
+    """Counts, mean PI, and the full per-class metric averages (Hi, Lo, Mean,
+    Pulse Amp, PI) that the running-average panel and the export both use."""
     nat = [e for e in epochs if e["type"] == NATIVE]
     art = [e for e in epochs if e["type"] == ARTIFICIAL]
     return {
@@ -147,6 +156,8 @@ def summarize(epochs: list) -> dict:
         "n_artificial": len(art),
         "mean_pi_native": _mean_of(e["pi"] for e in nat),
         "mean_pi_artificial": _mean_of(e["pi"] for e in art),
+        "avg_native": average_metrics(nat),
+        "avg_artificial": average_metrics(art),
     }
 
 

@@ -302,8 +302,10 @@ controls live in one place on the **Main screen** (not on the CA/CVR tabs):
 workbook has been removed). Each PI tab lists **one row per beat** — `Beat`,
 `Type`, `Start_s`, `End_s`, the TCD metrics (`TCD_Hi`, `TCD_Lo`, `TCD_Mean`,
 `TCD_PulseAmp`, `TCD_PI`) and, once TCD↔ABP sync is set, the `ABP_*` metrics.
-For Serial LVAD, PI is `MCA_PI` / `PCA_PI` by the vessel tag; for RAMPs it is the
-speed's `PI` tab. The CVR tab is a compact metric/value table.
+The per-beat rows are followed by **Native average** and **Artificial average**
+rows carrying the mean of each metric over that class. For Serial LVAD, PI is
+`MCA_PI` / `PCA_PI` by the vessel tag; for RAMPs it is the speed's `PI` tab. The
+CVR tab is a compact metric/value table.
 
 ### Reopening a saved study
 
@@ -375,6 +377,14 @@ and the **ABP epochs** table fills with the ABP metrics for each selected beat.
 **Reset sync** clears the shift. The *Selected Beats* card shows two tables, one
 for TCD epochs and one for ABP epochs; the export PI tab carries both
 (`TCD_*` and, once synced, `ABP_*` columns).
+
+**Running averages.** Below the tables a small *Averages* panel shows the mean
+of `Hi`, `Lo`, `Mean`, `Pulse Amp`, and `PI` across all selected beats, split
+into a **Native** column and an **Artificial** column. It recalculates on its own
+every time a beat is added or removed, so it always reflects the current set. The
+same per-class averages are written to the Excel PI tab as trailing
+**Native average** / **Artificial average** rows (with `ABP_*` values too once
+synced).
 
 Native beats are drawn in **blue** and artificial in **red** (distinguishable for
 red-green colour-blind reviewers).

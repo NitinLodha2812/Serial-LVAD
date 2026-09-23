@@ -1032,3 +1032,24 @@ body { padding-bottom: 40px; }
 .instr-body ul { margin: 0 0 8px 18px; }
 .instr-body li { margin: 3px 0; }
 .instr-body .instr-todo { color: var(--text-muted); font-style: italic; }
+
+/* ── PI running-averages mini table ── */
+.pi-avg-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: .78rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.pi-avg-table th, .pi-avg-table td { padding: 4px 8px; text-align: right; }
+.pi-avg-table th:first-child, .pi-avg-table td:first-child {
+  text-align: left; color: var(--text-muted); font-weight: 500;
+}
+.pi-avg-table thead, .pi-avg-table tr:first-child { background: var(--bg); }
+.pi-avg-table th { font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; }
+.pi-avg-table th.avg-native { color: var(--native, #2563EB); }
+.pi-avg-table th.avg-artificial { color: var(--artificial, #C0392B); }
+.pi-avg-table td:not(:first-child) { font-family: var(--font-mono); color: var(--text); }
+.pi-avg-table tr:not(:last-child) td { border-bottom: 1px solid var(--border); }

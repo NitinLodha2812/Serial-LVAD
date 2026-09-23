@@ -400,6 +400,16 @@
           </div>
         </div>
 
+        <!-- running averages over all selected beats (auto-updates) -->
+        <table class="pi-avg-table" id="piAvgPanel">
+          <tr><th>Average</th><th class="avg-native">Native</th><th class="avg-artificial">Artificial</th></tr>
+          <tr><td>Hi</td><td id="avgNatHi">—</td><td id="avgArtHi">—</td></tr>
+          <tr><td>Lo</td><td id="avgNatLo">—</td><td id="avgArtLo">—</td></tr>
+          <tr><td>Mean</td><td id="avgNatMean">—</td><td id="avgArtMean">—</td></tr>
+          <tr><td>Pulse Amp</td><td id="avgNatPa">—</td><td id="avgArtPa">—</td></tr>
+          <tr><td>PI</td><td id="avgNatPi">—</td><td id="avgArtPi">—</td></tr>
+        </table>
+
         <div class="marks-panel" id="piMarksPanel">
           <div class="marks-header">
             <label class="marks-all"><input type="checkbox" id="piMarksAll" checked> Marks</label>

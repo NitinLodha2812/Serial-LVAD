@@ -247,9 +247,29 @@ def pi_epochs_frame(tcd_epochs: list, abp_epochs: list = None):
                 "ABP_PulseAmp": a.get("pulse_amp"), "ABP_PI": a.get("pi"),
             })
         rows.append(row)
+
+    has_abp = any(abp_by_id.get(e["id"], {}).get("max") is not None for e in tcd_epochs)
+
+    # Per-class running averages (Hi/Lo/Mean/Pulse Amp/PI) as trailing rows.
+    for kind, name in ((pi_analysis.NATIVE, "Native average"),
+                       (pi_analysis.ARTIFICIAL, "Artificial average")):
+        tcd_items = [e for e in tcd_epochs if e["type"] == kind]
+        if not tcd_items:
+            continue
+        avg = pi_analysis.average_metrics(tcd_items)
+        row = {"Beat": name, "Type": "average", "Start_s": None, "End_s": None,
+               "TCD_Hi": avg["max"], "TCD_Lo": avg["min"], "TCD_Mean": avg["mean"],
+               "TCD_PulseAmp": avg["pulse_amp"], "TCD_PI": avg["pi"]}
+        if has_abp:
+            abp_items = [abp_by_id[e["id"]] for e in tcd_items if e["id"] in abp_by_id]
+            aavg = pi_analysis.average_metrics(abp_items)
+            row.update({"ABP_Hi": aavg["max"], "ABP_Lo": aavg["min"], "ABP_Mean": aavg["mean"],
+                        "ABP_PulseAmp": aavg["pulse_amp"], "ABP_PI": aavg["pi"]})
+        rows.append(row)
+
     cols = ["Beat", "Type", "Start_s", "End_s",
             "TCD_Hi", "TCD_Lo", "TCD_Mean", "TCD_PulseAmp", "TCD_PI"]
-    if any(abp_by_id.get(e["id"], {}).get("max") is not None for e in tcd_epochs):
+    if has_abp:
         cols += ["ABP_Hi", "ABP_Lo", "ABP_Mean", "ABP_PulseAmp", "ABP_PI"]
     return pd.DataFrame(rows, columns=cols)
 
