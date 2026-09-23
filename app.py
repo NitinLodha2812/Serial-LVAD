@@ -7,14 +7,13 @@ import numpy as np
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask.json.provider import DefaultJSONProvider
 from backend.session_state import (
-    SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, THREE_MIN_SAMPLES,
+    SessionState, SAMPLE_RATE, FIVE_MIN_SAMPLES, THIRTY_SEC_SAMPLES,
     BASELINE_SAMPLES, HYPERCAP_SAMPLES, MODE_RAMPS, MODE_SERIAL,
     window_end_for_valid_count,
 )
 from backend.calculations import compute_mx, compute_cvr
 from backend.export import (
-    save_excel, save_progress_json, save_pi_excel, export_all_cacvr,
-    parse_progress_payload,
+    save_excel, save_progress_json, export_all_cacvr, parse_progress_payload,
 )
 from backend import pi_analysis, cacvr_sessions
 from backend import export as export_backend
@@ -53,14 +52,11 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_uploads")
 EXPORT_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_exports")
-# PI selections auto-save here, one file per (recording, speed) — the web
-# equivalent of PI.m's `<basename>_speed<N>_selections.mat` beside the data.
-PI_SESSION_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_pi_sessions")
-# CA/CVR results auto-save here, one file per (recording, session/speed).
+# CA/CVR/PI results auto-save here, one file per (recording, tag). PI is no
+# longer stored separately — it rides on the tag alongside CA and CVR.
 CACVR_SESSION_DIR = os.path.join(tempfile.gettempdir(), "serial_lvad_cacvr_sessions")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
-os.makedirs(PI_SESSION_DIR, exist_ok=True)
 os.makedirs(CACVR_SESSION_DIR, exist_ok=True)
 
 # ── global session state (single-user desktop app) ──
@@ -196,16 +192,22 @@ def api_reopen():
         f"{len(norm['sessions'])} session(s). Load the original recording to see plots."
     )
 
-    # Rewrite each restored session to disk so Load Session / Export All work.
+    # Rewrite each restored tag to disk so Load Session / Export All work. PI
+    # beats (with waveforms) ride on the tag, so they come back too.
     restored = []
+    total_pi = 0
     for s in norm["sessions"]:
         label = s.get("label") or ""
+        pi_epochs = s.get("pi_epochs", []) or []
+        total_pi += len(pi_epochs)
         payload = {
             "base_name": new_state.base_name,
             "patient_id": new_state.patient_id,
             "label": label,
             "results": s.get("results", {}),
             "selections": s.get("selections", {}),
+            "pi_epochs": pi_epochs,
+            "pi_abp_shift": s.get("pi_abp_shift", 0.0),
         }
         try:
             cacvr_sessions.save_session(CACVR_SESSION_DIR, new_state.base_name, label, payload)
@@ -213,7 +215,7 @@ def api_reopen():
         except Exception as e:
             new_state.log(f"Reopen: could not restore session {label!r}: {e}")
 
-    # Adopt the first restored session as the working set.
+    # Adopt the first restored tag as the working set (CA/CVR and PI).
     first = norm["sessions"][0]
     loaded = first.get("results") or {}
     for a in ("CA", "CVR"):
@@ -222,13 +224,15 @@ def api_reopen():
             loaded[a].setdefault(v, None)
     new_state.results = loaded
     new_state.cacvr_speed = first.get("label") or ""
-
-    pi = norm.get("pi") or {}
-    n_pi = (pi.get("summary") or {}).get("n_native", 0) + (pi.get("summary") or {}).get("n_artificial", 0)
+    new_state.pi_epochs = first.get("pi_epochs", []) or []
+    new_state.pi_next_id = max((e["id"] for e in new_state.pi_epochs), default=0) + 1
+    new_state.pi_abp_shift = float(first.get("pi_abp_shift", 0.0) or 0.0)
+    new_state.log(f"Reopened {len(restored)} tag(s); {total_pi} PI beat(s) restored.")
 
     state = new_state
     return jsonify({
         "reopened": True,
+        "gui_version": norm.get("gui_version"),
         "study_mode": state.study_mode,
         "patient_id": state.patient_id,
         "session": state.session,
@@ -236,7 +240,7 @@ def api_reopen():
         "restored_labels": restored,
         "n_sessions": len(restored),
         "current_label": state.cacvr_speed,
-        "pi_epochs": n_pi,
+        "pi_epochs": total_pi,
         "load_log": list(state.log_lines),
     })
 
@@ -323,6 +327,50 @@ def api_ca_select():
     })
 
 
+@app.route("/api/ca/select_manual", methods=["POST"])
+def api_ca_select_manual():
+    """
+    Manual MX window: the operator drags a rectangle on the TCD plot and we use
+    its exact time span (no fixed 5-minute length), so a recording that is a bit
+    under 5 minutes can still be included. NaN samples are preserved so the
+    windowing inside compute_mx stays aligned in wall-clock time.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    try:
+        start = float(body["start_time"]); end = float(body["end_time"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "start_time and end_time (numbers) are required."}), 400
+    if end < start:
+        start, end = end, start
+
+    i0 = int(np.searchsorted(state.time, start, side="left"))
+    i1 = int(np.searchsorted(state.time, end, side="right"))
+    i0 = max(0, min(i0, len(state.time) - 1))
+    i1 = max(i0 + 1, min(i1, len(state.time)))
+    inds = slice(i0, i1)
+
+    sel_time = state.time[inds].copy()
+    sel_env = state.env_u[inds].copy()
+    sel_abp = state.abp[inds].copy()
+    if len(sel_time) == 0 or np.all(np.isnan(sel_env)):
+        return jsonify({"error": "Manual selection contains no valid TCD data."}), 400
+
+    state.ca_selection = {"time": sel_time, "env": sel_env, "abp": sel_abp}
+    dur = float(sel_time[-1] - sel_time[0])
+    state.log(
+        f"CA: manual MX window t={float(sel_time[0]):.2f}..{float(sel_time[-1]):.2f} "
+        f"({dur:.1f}s, {len(sel_time)} samples)."
+    )
+    return jsonify({
+        "start_time": float(sel_time[0]),
+        "end_time": float(sel_time[-1]),
+        "n_samples": int(len(sel_time)),
+        "duration_s": round(dur, 2),
+    })
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  CA – CLEAR SELECTION
 # ═══════════════════════════════════════════════════════════════════════
@@ -406,11 +454,11 @@ def api_ca_calculate():
 @app.route("/api/ca/mfv_only", methods=["POST"])
 def api_ca_mfv_only():
     """
-    Mean flow velocity over a 3-minute epoch of the TCD envelope alone.
+    Mean flow velocity over a 30-second epoch of the TCD envelope alone.
 
     Same idea as the MFV that falls out of the MX calculation, but a shorter
     window and no ABP: the operator clicks a start point, we walk forward to
-    collect 3 minutes of *valid* (non-NaN) envelope samples (extending past any
+    collect 30 seconds of *valid* (non-NaN) envelope samples (extending past any
     brushed-out data), and average them. There is no MX — the result fills the
     Mean MFV box while the MX box stays empty.
     """
@@ -423,13 +471,13 @@ def api_ca_mfv_only():
 
     valid = ~np.isnan(state.env_u)
     idx_end, n_valid, exhausted = window_end_for_valid_count(
-        valid, idx_start, THREE_MIN_SAMPLES
+        valid, idx_start, THIRTY_SEC_SAMPLES
     )
-    n_extended = (idx_end - idx_start + 1) - THREE_MIN_SAMPLES
+    n_extended = (idx_end - idx_start + 1) - THIRTY_SEC_SAMPLES
     if exhausted:
         state.log(
-            f"CA: MFV-only — not enough valid envelope samples to fill a 3-min "
-            f"window ({n_valid}/{THREE_MIN_SAMPLES}); using all available data."
+            f"CA: MFV-only — not enough valid envelope samples to fill a 30-s "
+            f"window ({n_valid}/{THIRTY_SEC_SAMPLES}); using all available data."
         )
     elif n_extended > 0:
         state.log(
@@ -462,7 +510,7 @@ def api_ca_mfv_only():
     state.ca_result = result
     state.results["CA"][vessel] = result
     state.log(
-        f"CA: MFV-only = {mean_mfv:.4f} over 3-min TCD epoch "
+        f"CA: MFV-only = {mean_mfv:.4f} over 30-s TCD epoch "
         f"t={float(sel_time[0]):.2f}..{float(sel_time[-1]):.2f} "
         f"({len(sel_time)} samples), stored for {vessel}."
     )
@@ -849,40 +897,25 @@ def api_edit_nan():
 # ═══════════════════════════════════════════════════════════════════════
 
 def _pi_payload():
-    """Everything the PI tab needs to redraw itself after any mutation."""
+    """Everything the PI tab needs to redraw itself after any mutation. PI now
+    rides on the main-screen tag, so there is no PI-specific speed/vessel; the
+    ABP epoch table is derived from the TCD epochs and the sync shift."""
     return {
         "epochs": pi_analysis.numbered(state.pi_epochs),
+        "abp_epochs": pi_analysis.abp_epochs_for(
+            state.pi_epochs, state.time, state.abp, state.pi_abp_shift),
         "summary": pi_analysis.summarize(state.pi_epochs),
-        "speed": state.pi_speed,
-        "vessel": state.pi_vessel,
+        "abp_shift": round(state.pi_abp_shift, 4),
+        "tag": state.cacvr_speed,
         "patient_id": state.patient_id,
         "base_name": state.base_name,
     }
 
 
 def _pi_autosave():
-    """
-    Persist the current selections for the current speed.
-
-    PI.m auto-saves on every change to `updateSelectionCount`, so a crash or a
-    mis-click never costs an afternoon of brushing. Failures are logged, not
-    raised — losing the auto-save must not fail the selection that triggered it.
-    """
-    if not state.base_name:
-        return None
-    payload = {
-        "base_name": state.base_name,
-        "patient_id": state.patient_id,
-        "speed": state.pi_speed,
-        "vessel": state.pi_vessel,
-        "epochs": state.pi_epochs,
-    }
-    try:
-        return pi_analysis.save_session(
-            PI_SESSION_DIR, state.base_name, state.pi_speed, state.pi_vessel, payload)
-    except Exception as e:
-        state.log(f"PI: WARNING — auto-save failed: {e}")
-        return None
+    """PI now saves as part of the current tag's CA/CVR session — auto-save the
+    whole tag so a crash or mis-click never costs an afternoon of brushing."""
+    _cacvr_autosave()
 
 
 @app.route("/api/pi/trace")
@@ -907,36 +940,38 @@ def api_pi_state():
     return jsonify(_pi_payload())
 
 
-@app.route("/api/pi/meta", methods=["POST"])
-def api_pi_meta():
+@app.route("/api/pi/sync", methods=["POST"])
+def api_pi_sync():
     """
-    Update the PI tab's Speed and Vessel fields.
+    Synchronise the ABP tracing to the TCD tracing.
 
-    Speed and Vessel together identify a saved PI set (so MCA and PCA can both
-    be kept for a Serial LVAD recording). If the operator changes either to a
-    NEW value while beats are already selected, those beats belong to the OLD
-    (speed, vessel): persist them, then start a fresh set so the new identity
-    doesn't inherit the previous vessel's/speed's beats. `switched` tells the
-    frontend the working set was cleared.
+    The operator picks the low point of one artificial beat on the TCD plot and
+    the low point of the same beat on the ABP plot; the ABP tracing is then
+    shifted so those line up (shift = t_tcd - t_abp, i.e. an ABP sample at
+    original time t is treated as aligned to t + shift). The ABP epoch table is
+    recomputed off the shifted tracing. Body: {tcd_time, abp_time} to set, or
+    {reset: true} to clear the shift.
     """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
     body = request.get_json() or {}
-    new_speed = str(body.get("speed", state.pi_speed)).strip()
-    new_vessel = str(body.get("vessel", state.pi_vessel)).strip()
-    changed = (new_speed != state.pi_speed) or (new_vessel != state.pi_vessel)
-
-    switched = False
-    if changed and state.pi_epochs:
-        _pi_autosave()               # save the outgoing (speed, vessel) first
-        state.pi_epochs = []         # then start the new identity clean
-        state.pi_next_id = 1
-        switched = True
-
-    state.pi_speed = new_speed
-    state.pi_vessel = new_vessel
-    return jsonify({"ok": True, "speed": state.pi_speed, "vessel": state.pi_vessel,
-                    "switched": switched})
+    if body.get("reset"):
+        state.pi_abp_shift = 0.0
+        state.log("PI: ABP synchronisation reset (shift = 0).")
+        _pi_autosave()
+        return jsonify(_pi_payload())
+    try:
+        tcd_time = float(body["tcd_time"])
+        abp_time = float(body["abp_time"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "tcd_time and abp_time (numbers) are required."}), 400
+    state.pi_abp_shift = tcd_time - abp_time
+    state.log(
+        f"PI: ABP synchronised — TCD point t={tcd_time:.3f}, ABP point "
+        f"t={abp_time:.3f}, shift = {state.pi_abp_shift:+.3f}s."
+    )
+    _pi_autosave()
+    return jsonify(_pi_payload())
 
 
 @app.route("/api/pi/select", methods=["POST"])
@@ -1067,144 +1102,14 @@ def api_pi_deselect():
 
 @app.route("/api/pi/clear", methods=["POST"])
 def api_pi_clear():
-    """
-    Drop every selection for the current speed.
-
-    Deliberately does *not* auto-save: the saved session for this speed stays
-    on disk so a mis-click here is recoverable via Load Speed.
-    """
+    """Drop every PI selection for the current tag."""
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
     state.pi_epochs = []
-    state.log("PI: selections cleared (saved session left on disk).")
+    state.pi_next_id = 1
+    state.log("PI: selections cleared.")
+    _pi_autosave()
     return jsonify(_pi_payload())
-
-
-@app.route("/api/pi/sessions")
-def api_pi_sessions():
-    """Saved per-speed selection files for the loaded recording."""
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-    return jsonify({"sessions": pi_analysis.list_sessions(PI_SESSION_DIR, state.base_name)})
-
-
-@app.route("/api/pi/load_session", methods=["POST"])
-def api_pi_load_session():
-    """Replace the current selections with a saved speed's."""
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-    body = request.get_json() or {}
-    fname = body.get("filename")
-    if not fname:
-        return jsonify({"error": "filename is required"}), 400
-    try:
-        data = pi_analysis.load_session(PI_SESSION_DIR, fname)
-    except (OSError, ValueError) as e:
-        return jsonify({"error": f"Could not load session: {e}"}), 400
-
-    epochs = data.get("epochs", [])
-    state.pi_epochs = epochs
-    state.pi_next_id = max((e["id"] for e in epochs), default=0) + 1
-    state.pi_speed = data.get("speed", "")
-    state.pi_vessel = data.get("vessel", "") or state.pi_vessel
-    state.log(
-        f"PI: loaded session {fname} — "
-        f"{sum(1 for e in epochs if e['type'] == pi_analysis.NATIVE)} native, "
-        f"{sum(1 for e in epochs if e['type'] == pi_analysis.ARTIFICIAL)} artificial."
-    )
-    return jsonify(_pi_payload())
-
-
-@app.route("/api/pi/load_all")
-def api_pi_load_all():
-    """
-    Every saved speed at once, for the read-only overlay comparison view.
-    Does not touch the working selections.
-    """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-    speeds = []
-    for meta in pi_analysis.list_sessions(PI_SESSION_DIR, state.base_name):
-        try:
-            data = pi_analysis.load_session(PI_SESSION_DIR, meta["filename"])
-        except (OSError, ValueError):
-            continue
-        speeds.append({**meta, "epochs": data.get("epochs", [])})
-    if not speeds:
-        return jsonify({"error": "No saved speed sessions found for this recording."}), 400
-    return jsonify({"speeds": speeds})
-
-
-@app.route("/api/pi/next_speed", methods=["POST"])
-def api_pi_next_speed():
-    """
-    Move on to the next pump speed: clear the working selections and adopt the
-    new speed label. Reports whether that speed already has saved selections so
-    the UI can offer to load them, as PI.m's questdlg does.
-    """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-    body = request.get_json() or {}
-    speed = str(body.get("speed", "")).strip()
-    if not speed:
-        return jsonify({"error": "A speed label is required."}), 400
-
-    state.pi_epochs = []
-    state.pi_speed = speed
-    fname = pi_analysis.session_filename(state.base_name, speed, state.pi_vessel)
-    existing = os.path.isfile(os.path.join(PI_SESSION_DIR, fname))
-    state.log(f"PI: ready for speed {speed!r}. Existing selections: {existing}")
-    return jsonify({
-        **_pi_payload(),
-        "existing_session": fname if existing else None,
-    })
-
-
-@app.route("/api/pi/export", methods=["POST"])
-def api_pi_export():
-    """
-    Append this speed's epoch metrics as one row of the "PI Demographics"
-    sheet. A prior workbook may be uploaded to append to; without one the
-    sheet is created from scratch.
-    """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
-    if not state.pi_epochs:
-        return jsonify({"error": "No epochs selected — nothing to export."}), 400
-
-    patient_id = (request.form.get("patient_id") or state.patient_id or "").strip()
-    speed = (request.form.get("speed") or state.pi_speed or "").strip()
-    vessel = (request.form.get("vessel") or state.pi_vessel or "").strip()
-
-    prior_path = None
-    prior_name = None
-    f = request.files.get("workbook")
-    if f and f.filename:
-        import re as _re
-        prior_name = _re.sub(r"[^\w\s.\-]", "_", f.filename)
-        prior_path = os.path.join(UPLOAD_DIR, prior_name)
-        try:
-            f.save(prior_path)
-        except Exception as e:
-            return jsonify({"error": f"Could not read the prior workbook: {e}"}), 400
-
-    row = pi_analysis.build_excel_row(state.pi_epochs, patient_id, speed, vessel)
-    stem = f"{patient_id or state.base_name or 'PI'}_PI"
-    try:
-        fname = save_pi_excel(row, EXPORT_DIR, prior_path=prior_path,
-                              prior_filename=prior_name, fallback_stem=stem)
-    except Exception as e:
-        import traceback
-        print(f"PI export error:\n{traceback.format_exc()}")
-        state.log(f"PI: export failed — {e}")
-        return jsonify({"error": f"Export failed: {e}"}), 400
-
-    summary = pi_analysis.summarize(state.pi_epochs)
-    state.log(
-        f"PI: exported {summary['n_native']} native + {summary['n_artificial']} "
-        f"artificial epoch(s) to {fname}"
-    )
-    return jsonify({"filename": fname, "summary": summary})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1308,6 +1213,11 @@ def _cacvr_has_results(results=None):
     return any((results.get(a) or {}).get(v) for a in ("CA", "CVR") for v in ("MCA", "PCA"))
 
 
+def _tag_has_anything():
+    """True if the current tag has any CA/CVR result or any PI beat."""
+    return _cacvr_has_results() or bool(state.pi_epochs)
+
+
 def _cacvr_payload():
     return {
         "label": state.cacvr_speed,
@@ -1319,13 +1229,12 @@ def _cacvr_payload():
 
 
 def _cacvr_autosave():
-    """Persist the current session's CA/CVR results under the current label.
-
-    Runs after every CA/CVR calculation, so building up a study is just:
-    calculate for a label, then move on — the disk copy is always current and
-    the final Export All simply gathers them.
+    """Persist the current tag's CA/CVR results AND PI beats under the current
+    label. Runs after every CA/CVR/PI mutation, so building up a study is just:
+    work a tag, then move on — the disk copy is always current and Export All
+    simply gathers them.
     """
-    if not state.base_name or not _cacvr_has_results():
+    if not state.base_name or not _tag_has_anything():
         return None
     payload = {
         "base_name": state.base_name,
@@ -1333,6 +1242,10 @@ def _cacvr_autosave():
         "label": state.cacvr_speed,
         "results": export_backend.serialise(state.results),
         "selections": _cacvr_selection_ranges(),
+        "pi_epochs": export_backend.serialise(state.pi_epochs),
+        "pi_abp_epochs": export_backend.serialise(
+            pi_analysis.abp_epochs_for(state.pi_epochs, state.time, state.abp, state.pi_abp_shift)),
+        "pi_abp_shift": round(state.pi_abp_shift, 4),
     }
     try:
         return cacvr_sessions.save_session(
@@ -1385,11 +1298,13 @@ def api_cacvr_next_speed():
         return jsonify({"error": "A session/speed label is required."}), 400
 
     _cacvr_autosave()   # make sure the outgoing label is persisted
-    # Clear the working results and all selections.
+    # Clear the working results and all selections (CA/CVR and PI).
     state.results = {"CA": {"MCA": None, "PCA": None}, "CVR": {"MCA": None, "PCA": None}}
     state.ca_selection = state.ca_result = None
     state.cvr_baseline = state.cvr_hypercap = None
     state.cvr_co2_baseline = state.cvr_co2_hypercap = state.cvr_result = None
+    state.pi_epochs = []
+    state.pi_next_id = 1
     state.cacvr_speed = label
 
     fname = cacvr_sessions.session_filename(state.base_name, label)
@@ -1421,8 +1336,16 @@ def api_cacvr_load_session():
             loaded[a].setdefault(v, None)
     state.results = loaded
     state.cacvr_speed = data.get("label", cacvr_sessions.label_from_filename(state.base_name, fname))
-    state.log(f"CA/CVR: loaded session {fname} (label {state.cacvr_speed!r}).")
-    return jsonify({**_cacvr_payload(), "loaded_selections": data.get("selections", {})})
+    # PI beats ride on the tag too — restore them.
+    state.pi_epochs = data.get("pi_epochs", []) or []
+    state.pi_next_id = max((e["id"] for e in state.pi_epochs), default=0) + 1
+    state.pi_abp_shift = float(data.get("pi_abp_shift", 0.0) or 0.0)
+    state.log(
+        f"CA/CVR: loaded session {fname} (label {state.cacvr_speed!r}); "
+        f"{len(state.pi_epochs)} PI beat(s)."
+    )
+    return jsonify({**_cacvr_payload(), "loaded_selections": data.get("selections", {}),
+                    "pi": _pi_payload()})
 
 
 @app.route("/api/cacvr/export_all", methods=["POST"])
@@ -1436,19 +1359,16 @@ def api_cacvr_export_all():
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
 
-    _cacvr_autosave()   # fold in the current working CA/CVR session
-    if state.pi_epochs:
-        _pi_autosave()  # and the current working PI selections
+    _cacvr_autosave()   # fold in the current working tag (CA/CVR and PI)
     sessions = cacvr_sessions.load_all(CACVR_SESSION_DIR, state.base_name)
-    pi_sessions = pi_analysis.load_all(PI_SESSION_DIR, state.base_name)
-    if not sessions and not pi_sessions:
+    if not sessions:
         return jsonify({"error": (
             "Nothing to export yet. Calculate MX/CVR or select PI beats for at "
             "least one vessel/speed first."
         )}), 400
 
     try:
-        zip_name, manifest = export_all_cacvr(state, sessions, pi_sessions, EXPORT_DIR)
+        zip_name, manifest = export_all_cacvr(state, sessions, EXPORT_DIR)
     except Exception as e:
         import traceback
         print(f"CA/CVR export error:\n{traceback.format_exc()}")

@@ -12,7 +12,7 @@ from datetime import datetime
 
 SAMPLE_RATE = 125
 FIVE_MIN_SAMPLES = 5 * 60 * SAMPLE_RATE   # 37 500
-THREE_MIN_SAMPLES = 3 * 60 * SAMPLE_RATE  # 22 500 (MFV-only epoch)
+THIRTY_SEC_SAMPLES = 30 * SAMPLE_RATE     # 3 750 (MFV-only epoch)
 BASELINE_SAMPLES = 4000                     # ~32 s
 HYPERCAP_SAMPLES = 1250                     # ~10 s
 
@@ -24,6 +24,10 @@ HYPERCAP_SAMPLES = 1250                     # ~10 s
 #                 Working label is a "Vessel".
 MODE_RAMPS = "ramps"
 MODE_SERIAL = "serial_lvad"
+
+# Bumped whenever the progress-JSON schema changes, so save/load can stay
+# backward compatible: newer builds branch on this to read older files.
+GUI_VERSION = "2026.09"
 
 
 # ── Column-name aliases ────────────────────────────────────────────────
@@ -238,12 +242,16 @@ class SessionState:
         self.cvr_co2_hypercap: dict | None = None
         self.cvr_result: dict | None = None
 
-        # PI state — brushed beat epochs, in insertion order. Each carries its
-        # own id so undo/deselect never depend on list positions.
+        # PI state — brushed beat epochs for the CURRENT tag, in insertion order.
+        # Each carries its own id so undo/deselect never depend on list
+        # positions. PI is no longer its own saved workflow: it rides on the
+        # main-screen tag (Vessel for Serial LVAD, Speed for RAMPs) alongside
+        # CA/CVR and is saved/loaded/exported with them.
         self.pi_epochs: list = []
         self.pi_next_id: int = 1
-        self.pi_speed: str = ""       # "Session/Speed" field on the PI tab
-        self.pi_vessel: str = ""
+        # TCD -> ABP synchronisation offset (seconds): ABP sample originally at
+        # time t is treated as aligned to t + pi_abp_shift.
+        self.pi_abp_shift: float = 0.0
 
         # CA/CVR session accumulation. Results are tagged with a session/speed
         # label and auto-saved per label to disk, so a whole study is built up

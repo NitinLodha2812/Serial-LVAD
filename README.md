@@ -17,16 +17,15 @@ The title bar reads **LVAD GUI** until you load a study, then becomes
 From a raw recording sampled at **125 Hz**, the app computes:
 
 - **CA / Mx index** — Cerebral Autoregulation, via the Mx correlation index
-  (plus a standalone **MFV-only** 3-minute measurement).
+  (plus a **MFV-only** 30-second measurement, and manual or auto MX windows).
 - **CVR** — Cerebrovascular Reactivity to CO₂ (both **MCVR** and **WCVR**).
-- **PI** — Pulsatility Index per beat epoch, for **native** (heart-driven) vs
-  **artificial** (pump-driven) beats. Ported from the separate MATLAB `PI.m`.
+- **PI** — Pulsatility Index per beat, for **native** (heart-driven) vs
+  **artificial** (pump-driven) beats, with optional TCD↔ABP synchronisation.
 
 CA, CVR, and PI are tagged, accumulated, and exported together from one place on
 the Main screen (Serial LVAD gets one 6-tab workbook per session; RAMPs gets one
-3-tab workbook per speed). PI also keeps its own separate `PI Demographics`
-export. A run can be saved to a JSON progress file and reopened later to
-continue.
+3-tab workbook per speed). A run can be saved to a version-stamped JSON progress
+file and reopened later to continue.
 
 ---
 
@@ -210,24 +209,31 @@ The Main screen is the single home for loading, tagging, saving, and exporting.
    data + one workbook per tag + the JSON). **Load Progress (JSON)…** reopens a
    saved progress file to continue later.
 
+The **Instructions** card has four buttons — **CA tab**, **CVR tab**, **PI tab**,
+**Miscellaneous** — that each open a pop-up with workflow tips.
+
 The **Activity Log** records every step, including the CVR values as they are
 calculated.
 
+Each tab's **Marks** panel has a **select-all** checkbox in its header to show or
+hide every mark at once.
+
 ### CA (Mx) tab
 
-1. Click **Select Start (5-min)**, then click on either plot to set the start of
-   a 5-minute analysis window (37,500 samples at 125 Hz).
+1. Choose the MX window mode with the toggle:
+   - **Auto 5-min** — click a plot to set the start of a 5-minute window.
+   - **Manual (drag)** — click **Select Window (drag)**, then drag a rectangle on
+     the TCD plot to use any span. Handy when a recording is a bit under
+     5 minutes but you still want to include it.
 2. Click **Calculate MX**. The **MX Index** and **Mean MFV** appear right under
-   the buttons. The result is tagged automatically (the vessel is derived from
-   the study/tag — RAMPs is always MCA — so there is no vessel dropdown).
+   the buttons. The vessel is derived from the study/tag (RAMPs is always MCA),
+   so there is no vessel dropdown.
    - Internally: non-overlapping 3-second averages of ABP/envU → MAP/MFV series,
      then a sliding Pearson correlation (21-value window, step 20) → **Mx = mean
      of the absolute correlation coefficients**.
-3. **Calculate MFV only (3-min)** — click the button, then click the TCD plot to
-   start a **3-minute** epoch. The app collects 3 minutes of valid (non-NaN)
-   envelope samples, averages them, and prints the result in the **Mean MFV**
-   box while the **MX** box stays empty. Use this when you only need MFV (a
-   shorter, TCD-only measurement, no ABP).
+3. **Calculate MFV only (30-s)** — click the button, then click the TCD plot to
+   start a **30-second** epoch. The app averages 30 seconds of valid (non-NaN)
+   envelope samples into the **Mean MFV** box while the **MX** box stays empty.
 4. **Clear Selection** removes the window. Use the zoom dropdown + **Apply Zoom**
    (or scroll to zoom, **Shift+drag** to pan) to navigate.
 
@@ -292,31 +298,26 @@ controls live in one place on the **Main screen** (not on the CA/CVR tabs):
    - plus one **`*_Master.xlsx`** (raw data + edits, written **once**; skipped
      after a JSON reopen with no raw data) and one **`*_progress.json`**.
 
-**PI is now part of this export** alongside CA and CVR. Each PI tab lists **one
-row per beat** — `Beat`, `Type`, `Start_s`, `End_s`, `Max`, `Min`, `Mean`,
-`PW_s`, `PI` — mirroring the on-screen PI table. For Serial LVAD, PI is split
-into `MCA_PI` / `PCA_PI` by the PI tab's **Vessel**; for RAMPs, PI is matched to
-each speed. The CVR tab is a compact metric/value table of the computed values.
-
-The standalone **PI Demographics** export (the **Export to Excel** button on the
-PI tab, one wide row per participant) is **kept unchanged** and is separate from
-this bundle.
-
-> On the PI tab, changing the **Speed** or **Vessel** while beats are selected
-> saves the current set under the old speed/vessel and starts a fresh one, so
-> MCA and PCA (or different speeds) never share beats.
+**PI is part of this export** alongside CA and CVR (the standalone PI Demographics
+workbook has been removed). Each PI tab lists **one row per beat** — `Beat`,
+`Type`, `Start_s`, `End_s`, the TCD metrics (`TCD_Hi`, `TCD_Lo`, `TCD_Mean`,
+`TCD_PulseAmp`, `TCD_PI`) and, once TCD↔ABP sync is set, the `ABP_*` metrics.
+For Serial LVAD, PI is `MCA_PI` / `PCA_PI` by the vessel tag; for RAMPs it is the
+speed's `PI` tab. The CVR tab is a compact metric/value table.
 
 ### Reopening a saved study
 
 **Load Progress (JSON)…** on the Main screen reopens a previously saved progress
 file (from **Save Progress** or the JSON inside an **Export All** zip) and
-restores every tag's results, so you can review them, load a tag, or re-export —
-the same idea as reopening in the PI GUI. It reads current and older progress
-files, and infers the study (RAMPs vs Serial LVAD) from files saved before study
-modes existed. The raw waveform is **not** stored in the JSON, so the plots stay
-empty until you load the original recording; because the restored tags are keyed
-by the recording's name, loading that recording afterwards lines them straight
-back up. (The Excel files are **not** used for reopening — only the JSON.)
+restores every tag's CA/CVR results **and PI beats**, so you can review them,
+load a tag, or re-export. The JSON is **version-stamped** (`gui_version`) so
+future changes stay backward compatible; it reads current and older progress
+files and infers the study (RAMPs vs Serial LVAD) from files saved before study
+modes existed. The raw waveform is **not** stored, so the plots stay empty until
+you load the original recording; because the restored tags are keyed by the
+recording's name, loading that recording afterwards lines them straight back up.
+Then **Load Vessel/Speed** on the Main screen restores that tag's CA, CVR, and PI
+windows together. (Only the JSON is used for reopening, never the Excel files.)
 
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*
@@ -341,56 +342,42 @@ On the PI tab both plots stay X-synced as you zoom or pan.
 
 ### PI (Epochs) tab
 
-Selects individual beats on the TCD envelope and reports a pulsatility index
-for each. This is the Python port of the standalone MATLAB `PI.m` tool.
+Selects individual beats on the TCD envelope and reports a pulsatility index for
+each. **PI now rides on the main-screen tag** (Vessel for Serial LVAD, Speed for
+RAMPs): there is no PI-specific Speed/Vessel field or Load/Save controls, and PI
+is saved, loaded, and exported with CA and CVR.
 
-1. Fill in **Session / Speed** and **Vessel** in the sidebar. Both are written
-   into the exported spreadsheet, and the speed also names the auto-save file.
-2. Zoom in until you can see individual beats — the zoom dropdown has
-   **Scale to 30 s**, or use the scroll wheel. The caption above the plot tells
-   you whether you are looking at full-resolution samples; you cannot brush a
-   beat accurately from a decimated view.
-3. With **Brush: ON** (the default), drag a rectangle around one beat, then
-   click **Select Native** or **Select Artificial**. Shift+drag pans instead of
-   brushing, and the scroll wheel still zooms.
-4. **Auto-Select Artificial** places an epoch every 2 s, each spanning
-   **−0.15 s before to +0.20 s after** the peak (0.35 s total — the pump beat is
-   asymmetric: ~0.15 s deceleration, ~0.20 s acceleration), marching from the
-   point you click to the right edge of the current view. These are fixed by the
-   beat physiology and are not adjustable. Pump beats are metronomic, so one
-   click captures a whole run of them.
-5. **Undo Last** drops the most recent epoch. Tick rows in the *Selected Epochs*
-   table and click **Remove Checked** to delete specific ones. **Clear All**
-   empties the working set but leaves the saved session on disk.
-6. **Export to Excel** appends one row to a `PI Demographics` sheet. Attach a
-   *prior workbook* to append to an existing sheet; leave it empty to create one.
-7. **Save & Next Speed** exports, then clears the selections and switches to a
-   new speed label — offering to reload that speed if you have worked on it
-   before.
+1. Zoom in until you can see individual beats (scroll wheel, or **Scale to 30 s**).
+2. With **Brush: ON** (the default), drag a rectangle around one beat, then click
+   **Select Native** or **Select Artificial**. Shift+drag pans; scroll zooms.
+3. **Auto-Select Artificial** places a beat every 2 s, each spanning
+   **−0.15 s before to +0.20 s after** the peak (0.35 s total), from the clicked
+   point to the right edge of the view.
+4. **Undo Last** drops the most recent beat. Tick rows in the *TCD epochs* table
+   and **Remove Checked** to delete specific ones; **Clear All Selections** empties
+   the tag's beats.
 
-Every selection change **auto-saves** to a per-speed file, so a crash or a
-mis-click never costs a session. **Load Speed…** restores one of them;
-**Load All Speeds** overlays every saved speed at once, colour-coded, as a
-read-only comparison view.
-
-Per epoch the app reports, matching `PI.m`:
+Per beat the tables report:
 
 | Column | Meaning |
 |--------|---------|
-| `Hi` / `Lo` / `Mean` | max, min and mean of the envelope over the epoch |
-| `PW`   | epoch duration, `t_last − t_first` (seconds) |
-| `PI`   | pulsatility index, `(Hi − Lo) / Mean` |
+| `Hi` / `Lo` | max, min of the signal over the beat |
+| `Pulse Amp` | `Hi − Lo` |
+| `Mean` | `⅓·Hi + ⅔·Lo` (weighted, not the sample mean) |
+| `PI` | `Pulse Amp / Mean` |
 
-Epochs are read from the **full-resolution** envelope regardless of the zoom
-level, and the envelope column is located by header name — so a recording whose
-`1-1 Env U` column sits somewhere other than column 5 still works.
+**TCD ↔ ABP synchronisation.** The fiABP/reABP tracing may be offset in time
+from the TCD envelope. To align them: click **1. Pick low point on TCD** and
+click the low point of one artificial beat on the TCD plot; then **2. Pick low
+point on ABP** and click the low point of the same beat on the ABP plot. The ABP
+tracing shifts by the time difference so its beats line up under the TCD beats,
+and the **ABP epochs** table fills with the ABP metrics for each selected beat.
+**Reset sync** clears the shift. The *Selected Beats* card shows two tables, one
+for TCD epochs and one for ABP epochs; the export PI tab carries both
+(`TCD_*` and, once synced, `ABP_*` columns).
 
-The PI tab shows the **fiABP / reABP** pressure waveform beneath the TCD trace,
-X-synced to it, with each selected beat shaded on the pressure plot too. Native
-beats are drawn in **blue** and artificial in **red** (chosen to be
-distinguishable for red-green colour-blind reviewers). **Note:** a fixed
-TCD↔pressure timing offset is not yet applied — the shaded pressure span is the
-same wall-clock window as the TCD beat, pending the agreed correction.
+Native beats are drawn in **blue** and artificial in **red** (distinguishable for
+red-green colour-blind reviewers).
 
 ---
 
@@ -418,16 +405,6 @@ out — they are recoverable from the raw recording.
 Files are named `{patient}_{session}_{timestamp}` and download through the browser
 automatically.
 
-### PI Demographics — `*---{timestamp}.xlsx`
-
-Written by **Export to Excel** on the PI tab, not by the Main-tab Save button.
-One row per (patient, speed, vessel), with columns `PatientID`, `SessionSpeed`,
-`Vessel`, then `NatHi_1 … NatPI_n` and `ArtHi_1 … ArtPI_n` for every selected
-epoch. Uploading a prior workbook appends to its existing sheet, padding both
-sides so old and new column sets line up; other sheets in that workbook are
-carried across. The source file is never overwritten — the timestamped copy is
-a new file.
-
 ---
 
 ## Project layout
@@ -440,9 +417,9 @@ Upenn_RA_Stroke/
 ├── backend/
 │   ├── session_state.py       # SessionState container + TXT/CSV parser
 │   ├── calculations.py        # compute_mx (CA) and compute_cvr (CVR)
-│   ├── pi_analysis.py         # PI epochs, metrics, per-speed session store
-│   ├── cacvr_sessions.py      # CA/CVR per-session/speed persistence
-│   └── export.py              # Excel + JSON + PI Demographics + study bundle
+│   ├── pi_analysis.py         # PI beat epochs + metrics + ABP-sync epochs
+│   ├── cacvr_sessions.py      # per-tag persistence (CA/CVR/PI together)
+│   └── export.py              # study bundle (workbooks + JSON) + reopen parser
 ├── templates/
 │   └── index.html             # 4-tab UI (Main / CA / CVR / PI)
 └── static/

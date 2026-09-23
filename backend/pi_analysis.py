@@ -8,15 +8,11 @@ operator brush individual beats as **Native** (heart-driven) or **Artificial**
 
     PI = (max - min) / mean          PW = t_last - t_first
 
-Selections auto-save to a per-speed `.mat` file so an operator can step through
-several pump speeds in one sitting and reload any of them later. Here the same
-selections persist as JSON, keyed by (recording base name, session/speed).
+PI beats now ride on the main-screen tag (Vessel for Serial LVAD, Speed for
+RAMPs) alongside CA and CVR: they are saved, loaded, and exported with them,
+so PI has no separate persistence of its own.
 """
 
-import glob
-import json
-import os
-import re
 import numpy as np
 
 
@@ -45,25 +41,28 @@ def _safe_float(v):
 
 def epoch_metrics(times: np.ndarray, amps: np.ndarray) -> dict:
     """
-    Per-epoch statistics, matching PI.m's addNewData:
+    Per-epoch statistics:
 
-        Hi   = max(amp)      Lo   = min(amp)      Mean = mean(amp)
-        PW   = time(end) - time(1)
-        PI   = (Hi - Lo) / Mean
+        Hi       = max(amp)              Lo = min(amp)
+        Mean     = (1/3)*Hi + (2/3)*Lo   (weighted, not the sample mean)
+        PulseAmp = Hi - Lo
+        PI       = PulseAmp / Mean
 
-    A zero mean would make PI infinite; that is reported as None rather than
-    Inf so it lands in the spreadsheet as a blank instead of a bogus number.
+    Mean is the weighted estimate the group uses (one third of the peak plus two
+    thirds of the trough). A zero mean would make PI infinite; that is reported
+    as None so it lands in the sheet as a blank rather than a bogus number.
+    `times` still fixes the epoch's span, but pulse width is no longer reported.
     """
     hi = float(np.max(amps))
     lo = float(np.min(amps))
-    mu = float(np.mean(amps))
-    pw = float(times[-1] - times[0])
-    pi = (hi - lo) / mu if mu != 0 else np.nan
+    mu = (1.0 / 3.0) * hi + (2.0 / 3.0) * lo
+    pulse_amp = hi - lo
+    pi = pulse_amp / mu if mu != 0 else np.nan
     return {
         "max": _safe_float(hi),
         "min": _safe_float(lo),
         "mean": _safe_float(mu),
-        "pw": _safe_float(pw),
+        "pulse_amp": _safe_float(pulse_amp),
         "pi": _safe_float(pi),
     }
 
@@ -165,128 +164,37 @@ def numbered(epochs: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  EXCEL ROW
+#  ABP EPOCHS (TCD → ABP synchronisation)
 # ═══════════════════════════════════════════════════════════════════════
 
-def _maybe_number(s):
+def abp_window_metrics(time: np.ndarray, abp: np.ndarray,
+                       t_start: float, t_end: float, shift: float):
     """
-    PI.m calls str2double() on the three ID fields, turning anything
-    non-numeric ("VAD056", "MCA") into NaN. Keep the text instead — a blank
-    Patient ID column helps nobody — but still emit real numbers as numbers
-    so the sheet stays sortable.
+    ABP metrics over the beat window [t_start, t_end] in TCD time, read off the
+    ABP tracing shifted by `shift` (ABP sample originally at t is aligned to
+    t + shift, so the samples we want sit at original times [t_start - shift,
+    t_end - shift]). Returns None if no valid ABP samples fall in the window.
     """
-    s = (s or "").strip()
-    if not s:
+    if abp is None or len(abp) == 0:
         return None
-    try:
-        return float(s)
-    except ValueError:
-        return s
+    o0, o1 = t_start - shift, t_end - shift
+    mask = (time >= o0) & (time <= o1) & ~np.isnan(abp)
+    if not mask.any():
+        return None
+    amps = abp[mask]
+    return {"n_samples": int(mask.sum()), **epoch_metrics(time[mask], amps)}
 
 
-def build_excel_row(epochs: list, patient_id: str, session_speed: str, vessel: str) -> dict:
-    """
-    One spreadsheet row: the three IDs, then every native epoch's five
-    metrics, then every artificial epoch's — the column layout PI.m writes
-    into the "PI Demographics" sheet.
-    """
-    row = {
-        "PatientID": _maybe_number(patient_id),
-        "SessionSpeed": _maybe_number(session_speed),
-        "Vessel": _maybe_number(vessel),
-    }
-    prefixes = {NATIVE: "Nat", ARTIFICIAL: "Art"}
-    for kind in (NATIVE, ARTIFICIAL):
-        p = prefixes[kind]
-        items = [e for e in numbered(epochs) if e["type"] == kind]
-        for e in items:
-            i = e["ordinal"]
-            row[f"{p}Hi_{i}"] = e["max"]
-            row[f"{p}Lo_{i}"] = e["min"]
-            row[f"{p}Mean_{i}"] = e["mean"]
-            row[f"{p}PW_{i}"] = e["pw"]
-            row[f"{p}PI_{i}"] = e["pi"]
-    return row
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  PER-SPEED SESSION PERSISTENCE  (the .mat auto-save, as JSON)
-# ═══════════════════════════════════════════════════════════════════════
-
-def _safe(part: str) -> str:
-    return re.sub(r"[^\w.\-]", "_", (part or "").strip())
-
-
-def session_filename(base_name: str, speed: str, vessel: str = "") -> str:
-    """
-    One file per (recording, speed, vessel). Vessel is part of the key so a
-    Serial LVAD recording can hold both MCA and PCA PI at the same (often empty)
-    speed without one overwriting the other.
-    """
-    stem = _safe(base_name) or "recording"
-    sp = _safe(speed) or "nospeed"
-    ve = _safe(vessel) or "novessel"
-    return f"{stem}__pi__{sp}__{ve}.json"
-
-
-def speed_from_filename(base_name: str, filename: str) -> str:
-    """Recover the speed label from a filename (fallback; payloads carry it)."""
-    stem = filename[:-5] if filename.endswith(".json") else filename
-    parts = stem.split("__")
-    # …__pi__<speed>__<vessel>
-    if len(parts) >= 4 and parts[-3] == "pi":
-        sp = parts[-2]
-        return "" if sp == "nospeed" else sp
-    return ""
-
-
-def save_session(session_dir: str, base_name: str, speed: str, vessel: str, payload: dict) -> str:
-    """Write selections for one (speed, vessel). Called after every mutation."""
-    os.makedirs(session_dir, exist_ok=True)
-    fname = session_filename(base_name, speed, vessel)
-    with open(os.path.join(session_dir, fname), "w") as f:
-        json.dump(payload, f, indent=2, allow_nan=False)
-    return fname
-
-
-def load_session(session_dir: str, filename: str) -> dict:
-    with open(os.path.join(session_dir, _safe(filename))) as f:
-        return json.load(f)
-
-
-def list_sessions(session_dir: str, base_name: str) -> list:
-    """
-    Every saved (speed, vessel) for this recording. Each entry carries the
-    speed and vessel labels and epoch counts so the picker can label itself.
-    """
-    if not os.path.isdir(session_dir):
-        return []
-    pattern = os.path.join(session_dir, f"{_safe(base_name)}__pi__*.json")
+def abp_epochs_for(epochs: list, time: np.ndarray, abp: np.ndarray, shift: float) -> list:
+    """One ABP epoch per TCD epoch (same beat, shifted ABP), numbered like the
+    TCD table so the two tables line up row for row."""
     out = []
-    for path in sorted(glob.glob(pattern)):
-        fname = os.path.basename(path)
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            continue
-        epochs = data.get("epochs", [])
-        out.append({
-            "filename": fname,
-            "speed": data.get("speed", speed_from_filename(base_name, fname)),
-            "vessel": data.get("vessel", ""),
-            "n_native": sum(1 for e in epochs if e["type"] == NATIVE),
-            "n_artificial": sum(1 for e in epochs if e["type"] == ARTIFICIAL),
-        })
-    return out
-
-
-def load_all(session_dir: str, base_name: str) -> list:
-    """Full PI session payloads (with epochs) for this recording, for export."""
-    out = []
-    for meta in list_sessions(session_dir, base_name):
-        try:
-            out.append(load_session(session_dir, meta["filename"]))
-        except (OSError, ValueError):
-            continue
+    for e in numbered(epochs):
+        m = abp_window_metrics(time, abp, e["t_start"], e["t_end"], shift)
+        rec = {"id": e["id"], "type": e["type"], "ordinal": e["ordinal"],
+               "t_start": e["t_start"], "t_end": e["t_end"]}
+        rec.update(m if m else {
+            "n_samples": 0, "max": None, "min": None,
+            "mean": None, "pulse_amp": None, "pi": None})
+        out.append(rec)
     return out

@@ -6,6 +6,8 @@
 const caCharts = new CACharts();
 const cvrCharts = new CVRCharts();
 const piChart = new PIChart();
+// Exposed for the browser console / debugging (and headless tests).
+window.caCharts = caCharts; window.cvrCharts = cvrCharts; window.piChart = piChart;
 let sessionData = null;   // overview data from server
 let clickMode = null;     // 'ca_select' | 'cvr_base' | 'cvr_hyp' | 'pi_auto' | null
 
@@ -60,7 +62,7 @@ const tagWord = () => isRamps() ? 'Speed' : 'Vessel';
 
 function enableCA(yes) {
   ['caSelectBtn', 'caClearBtn', 'caCalcBtn', 'caMfvBtn', 'caZoomMenu', 'caZoomBtn',
-   'caBrushBtn', ...navIds('ca')].forEach(id => {
+   'caBrushBtn', 'caSelAuto', 'caSelManual', ...navIds('ca')].forEach(id => {
     $(id).disabled = !yes;
   });
 }
@@ -95,9 +97,8 @@ function applyStudyMode(mode) {
 }
 
 function enablePI(yes) {
-  ['piSpeed', 'piVessel', 'piBrushBtn', 'piAutoBtn',
-   'piClearBtn', 'piZoomMenu', 'piZoomBtn', 'piLoadSpeedBtn', 'piLoadAllBtn',
-   'piNextSpeedBtn', 'piWorkbook', 'piExportBtn',
+  ['piBrushBtn', 'piAutoBtn', 'piUndoBtn', 'piClearBtn', 'piZoomMenu', 'piZoomBtn',
+   'piSyncTcdBtn', 'piSyncAbpBtn', 'piSyncResetBtn',
    ...navIds('pi')].forEach(id => {
     $(id).disabled = !yes;
   });
@@ -226,12 +227,98 @@ function populateMarks(prefix, data) {
 
 function toggleMarks(prefix) {
   const container = $(prefix + 'MarksList');
+  const boxes = [...container.querySelectorAll('input[type="checkbox"]')];
   const visible = new Set();
-  container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-    if (cb.checked) visible.add(parseInt(cb.dataset.index));
-  });
+  boxes.forEach(cb => { if (cb.checked) visible.add(parseInt(cb.dataset.index)); });
   ({ ca: caCharts, cvr: cvrCharts, pi: piChart })[prefix].updateMarks(visible);
+  // keep the header "select all" box in sync
+  const all = $(prefix + 'MarksAll');
+  if (all) all.checked = boxes.length > 0 && boxes.every(cb => cb.checked);
 }
+
+// wire the per-tab "select all marks" header checkboxes
+['ca', 'cvr', 'pi'].forEach(prefix => {
+  const all = $(prefix + 'MarksAll');
+  if (!all) return;
+  all.addEventListener('change', () => {
+    $(prefix + 'MarksList').querySelectorAll('input[type="checkbox"]')
+      .forEach(cb => { cb.checked = all.checked; });
+    toggleMarks(prefix);
+  });
+});
+
+
+/* ═══════════════════════ INSTRUCTIONS POP-UPS ═══════════════════════
+   Detailed per-tab instructions/workflow tips. Full text is pending from the
+   team; these placeholders summarise the workflow so the buttons are live. */
+const INSTRUCTIONS = {
+  ca: {
+    title: 'CA (MX) tab',
+    html: `<h4>Cerebral autoregulation (MX)</h4>
+      <ul>
+        <li>Pick the MX window mode: <b>Auto 5-min</b> (click a start point) or
+            <b>Manual (drag)</b> (drag any span, e.g. a bit under 5 minutes).</li>
+        <li><b>Calculate MX</b> computes the MX index and mean MFV.</li>
+        <li><b>Calculate MFV only (30-s)</b> gives a mean flow velocity over a
+            30-second TCD epoch; the MX box stays empty.</li>
+        <li>Use the ABP-source dropdown in the plot title to switch fiABP / A-LINE / reABP.</li>
+      </ul>
+      <p class="instr-todo">Detailed workflow tips to be added.</p>`,
+  },
+  cvr: {
+    title: 'CVR tab',
+    html: `<h4>Cerebrovascular reactivity</h4>
+      <ul>
+        <li>Select the TCD <b>baseline</b> and <b>hypercapnia</b> windows.</li>
+        <li>Pick the true end-tidal CO2 <b>baseline</b> and <b>hypercapnia</b> points
+            on the CO2 waveform.</li>
+        <li><b>Calculate CVR</b> shows MCVR / WCVR and the underlying values.</li>
+        <li>Remove individual selections in the Selections panel, or Clear All.</li>
+      </ul>
+      <p class="instr-todo">Detailed workflow tips to be added.</p>`,
+  },
+  pi: {
+    title: 'PI tab',
+    html: `<h4>Pulsatility index (beats)</h4>
+      <ul>
+        <li>Brush individual beats as <b>Native</b> or <b>Artificial</b>, or use
+            <b>Auto-Select Artificial</b>.</li>
+        <li>Metrics: Pulse Amp = Hi − Lo, Mean = ⅓·Hi + ⅔·Lo, PI = Pulse Amp / Mean.</li>
+        <li><b>ABP ↔ TCD sync</b>: pick the low point of one artificial beat on TCD,
+            then the same beat on ABP; the ABP tracing shifts to line up and the
+            ABP epoch table fills in.</li>
+        <li>PI is saved and exported with the current Vessel/Speed tag.</li>
+      </ul>
+      <p class="instr-todo">Detailed workflow tips to be added.</p>`,
+  },
+  misc: {
+    title: 'Miscellaneous',
+    html: `<h4>Study tags, saving, and export</h4>
+      <ul>
+        <li>Load a study with <b>Load Serial LVAD Data</b> or <b>Load RAMPs Data</b>.</li>
+        <li>Tag results by <b>Vessel</b> (Serial LVAD) or <b>Speed</b> (RAMPs);
+            <b>Save &amp; Next</b> to move on, <b>Load</b> to review a saved tag.</li>
+        <li><b>Save Progress (JSON)</b> is reopenable via <b>Load Progress (JSON)</b>.</li>
+        <li><b>Export All Study</b> writes the workbooks (CA / CVR / PI tabs) + JSON, zipped.</li>
+        <li>Marks and NaN edits are shared across tabs.</li>
+      </ul>
+      <p class="instr-todo">Detailed workflow tips to be added.</p>`,
+  },
+};
+
+document.querySelectorAll('.instr-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const info = INSTRUCTIONS[btn.dataset.instr];
+    if (!info) return;
+    $('instrTitle').textContent = info.title;
+    $('instrBody').innerHTML = info.html;
+    $('instrModal').classList.add('active');
+  });
+});
+$('instrClose').addEventListener('click', () => $('instrModal').classList.remove('active'));
+$('instrModal').addEventListener('click', (e) => {
+  if (e.target === $('instrModal')) $('instrModal').classList.remove('active');
+});
 
 
 /* ═══════════════════════ METADATA ═══════════════════════ */
@@ -333,14 +420,54 @@ $('jsonInput').addEventListener('change', async (e) => {
 
 /* ═══════════════════════ CA — SELECT ═══════════════════════ */
 
+// MX window selection mode: 'auto' (fixed 5-min from a click) or 'manual'
+// (drag a rectangle for any span, e.g. a bit under 5 min).
+let caSelMode = 'auto';
+let caManualArmed = false;
+
+function setCaSelMode(mode) {
+  caSelMode = mode;
+  $('caSelAuto').classList.toggle('active', mode === 'auto');
+  $('caSelManual').classList.toggle('active', mode === 'manual');
+  $('caSelectBtn').textContent = mode === 'auto' ? 'Select Start (5-min)' : 'Select Window (drag)';
+}
+$('caSelAuto').addEventListener('click', () => setCaSelMode('auto'));
+$('caSelManual').addEventListener('click', () => setCaSelMode('manual'));
+
 $('caSelectBtn').addEventListener('click', () => {
+  if (caSelMode === 'manual') {
+    // Arm a one-shot brush-drag that defines the MX window.
+    caManualArmed = true;
+    if (!brushState.ca.mode) toggleBrushMode('ca');   // turn brush on
+    toast('Drag a rectangle on the TCD plot to set the MX window', 'info');
+    appendLog('CA: drag to select the MX window (manual mode).');
+    return;
+  }
   clickMode = 'ca_select';
   toast('Click on a plot to set the 5-minute start point', 'info');
   appendLog('CA: Click on ABP or envU plot to set start time.');
-  // make canvases clickable
   $('caPlot1').parentElement.classList.add('clickable');
   $('caPlot2').parentElement.classList.add('clickable');
 });
+
+async function caManualSelect(rect) {
+  showLoading();
+  try {
+    const sel = await api('/api/ca/select_manual', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_time: rect.x_min, end_time: rect.x_max }),
+    });
+    caCharts.clearBrush();
+    if (brushState.ca.mode) toggleBrushMode('ca');   // turn brush back off
+    caCharts.addSelection(sel);
+    appendLog(`CA: Manual window t=${sel.start_time.toFixed(1)}..${sel.end_time.toFixed(1)} (${sel.duration_s}s).`);
+    toast(`Window selected (${sel.duration_s}s)`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('CA manual select error: ' + err.message);
+  }
+  hideLoading();
+}
 
 // listen for click on CA canvases
 ['caPlot1', 'caPlot2'].forEach(id => {
@@ -700,6 +827,12 @@ function updateBrushButtons(tab) {
 
 // Hook each chart-controller's brush-change callback to update the UI.
 caCharts.onBrushChange  = (info) => {
+  // Manual MX selection: the first completed brush defines the window.
+  if (caManualArmed && info.hasBrush && info.rect) {
+    caManualArmed = false;
+    caManualSelect(info.rect);
+    return;
+  }
   brushState.ca.hasBrush = !!info.hasBrush;
   updateBrushButtons('ca');
 };
@@ -835,12 +968,16 @@ piChart.onBrushChange = (info) => {
   $('piBrushClearBtn').disabled = !has;
 };
 
-/* ── render server state into chart, counters and table ── */
+/* ── render server state into chart, counters and the two tables ── */
+let piAbpEpochs = [];
+
 function renderPI(payload) {
   piEpochs = payload.epochs || [];
+  piAbpEpochs = payload.abp_epochs || [];
   // setEpochs also drops any "all speeds" overlay, so a mutation always
   // returns the plot to the working selections it is about to redraw.
   piChart.setEpochs(piEpochs);
+  piChart.setAbpShift(payload.abp_shift || 0);
 
   const s = payload.summary || {};
   $('piNativeCount').textContent = s.n_native ?? 0;
@@ -848,22 +985,23 @@ function renderPI(payload) {
   $('piNativePI').textContent = 'PI ' + fmt(s.mean_pi_native);
   $('piArtificialPI').textContent = 'PI ' + fmt(s.mean_pi_artificial);
 
-  if (payload.speed != null && document.activeElement !== $('piSpeed')) {
-    $('piSpeed').value = payload.speed;
-  }
-  if (payload.vessel && document.activeElement !== $('piVessel')) {
-    $('piVessel').value = payload.vessel;
-  }
+  const shift = payload.abp_shift || 0;
+  $('piSyncShift').textContent = shift.toFixed(3) + ' s';
+  $('piAbpSyncNote').textContent = shift ? `(shift ${shift >= 0 ? '+' : ''}${shift.toFixed(3)} s)`
+                                         : '(sync ABP to see values)';
 
   $('piUndoBtn').disabled = piEpochs.length === 0;
-  renderPIEpochTable();
+  renderPITcdTable();
+  renderPIAbpTable();
 }
 
-function renderPIEpochTable() {
+const PI_LABEL = (e) => (e.type === 'native' ? 'Native #' : 'Artificial #') + e.ordinal;
+
+function renderPITcdTable() {
   const body = $('piEpochBody');
   body.innerHTML = '';
   if (!piEpochs.length) {
-    body.innerHTML = '<tr class="epoch-empty"><td colspan="9">No epochs selected yet.</td></tr>';
+    body.innerHTML = '<tr class="epoch-empty"><td colspan="9">No beats selected yet.</td></tr>';
     $('piEpochAll').checked = false;
     $('piDeselectBtn').disabled = true;
     return;
@@ -871,14 +1009,11 @@ function renderPIEpochTable() {
   for (const e of piEpochs) {
     const tr = document.createElement('tr');
     tr.className = e.type === 'native' ? 'row-native' : 'row-artificial';
-    const label = (e.type === 'native' ? 'Native #' : 'Artificial #') + e.ordinal;
     const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.dataset.id = e.id;
+    cb.type = 'checkbox'; cb.dataset.id = e.id;
     cb.addEventListener('change', updatePIDeselectState);
-
-    const cells = [null, label, fmt(e.t_start), fmt(e.t_end),
-                   fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pw, 3), fmt(e.pi, 3)];
+    const cells = [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end),
+                   fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)];
     cells.forEach((text, i) => {
       const td = document.createElement('td');
       if (i === 0) td.appendChild(cb); else td.textContent = text;
@@ -888,6 +1023,26 @@ function renderPIEpochTable() {
   }
   $('piEpochAll').checked = false;
   updatePIDeselectState();
+}
+
+function renderPIAbpTable() {
+  const body = $('piAbpBody');
+  body.innerHTML = '';
+  const withVals = piAbpEpochs.filter(e => e.max != null);
+  if (!withVals.length) {
+    body.innerHTML = '<tr class="epoch-empty"><td colspan="8">No ABP epochs.</td></tr>';
+    return;
+  }
+  for (const e of piAbpEpochs) {
+    const tr = document.createElement('tr');
+    tr.className = e.type === 'native' ? 'row-native' : 'row-artificial';
+    const cells = [PI_LABEL(e), fmt(e.t_start), fmt(e.t_end),
+                   fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)];
+    cells.forEach(text => {
+      const td = document.createElement('td'); td.textContent = text; tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  }
 }
 
 function checkedEpochIds() {
@@ -907,46 +1062,17 @@ $('piEpochAll').addEventListener('change', (e) => {
 
 /* ── first-load setup ── */
 async function initPITab() {
-  // PI keeps its own Speed + Vessel fields (separate from CA/CVR). Default the
-  // vessel to MCA (the only RAMPs vessel; a sensible Serial LVAD starting point).
-  if (!$('piVessel').value) $('piVessel').value = 'MCA';
   piChart.setBrushMode(true);
   $('piBrushBtn').textContent = 'Brush: ON';
   $('piBrushBtn').classList.add('btn-primary');
   ['piNativeBtn', 'piArtificialBtn', 'piBrushClearBtn'].forEach(id => { $(id).disabled = true; });
-
   try {
-    await api('/api/pi/meta', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speed: $('piSpeed').value, vessel: $('piVessel').value }),
-    });
     renderPI(await api('/api/pi/state'));
   } catch (err) {
     appendLog('PI init error: ' + err.message);
   }
   await refreshPITrace();
 }
-
-/* ── metadata fields ── */
-async function pushPIMeta() {
-  try {
-    const r = await api('/api/pi/meta', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speed: $('piSpeed').value, vessel: $('piVessel').value }),
-    });
-    // Changing Speed/Vessel with beats already selected saves the old set and
-    // starts a fresh one; reflect that cleared state in the plot + table.
-    if (r.switched) {
-      renderPI(await api('/api/pi/state'));
-      appendLog(`PI: saved previous set; started a fresh set for speed "${r.speed}", vessel "${r.vessel}".`);
-      toast('Saved previous PI set; started a new one', 'info');
-    }
-  } catch (err) { appendLog('PI meta error: ' + err.message); }
-}
-$('piSpeed').addEventListener('change', pushPIMeta);
-$('piVessel').addEventListener('change', pushPIMeta);
 
 /* ── brush toggle ── */
 $('piBrushBtn').addEventListener('click', () => {
@@ -977,8 +1103,8 @@ async function piSelect(kind) {
     piChart.clearBrush();
     renderPI(payload);
     const last = piEpochs[piEpochs.length - 1];
-    appendLog(`PI: ${kind} epoch #${last.ordinal} — PI = ${fmt(last.pi, 3)}, PW = ${fmt(last.pw, 3)} s`);
-    toast(`${kind === 'native' ? 'Native' : 'Artificial'} epoch added (PI = ${fmt(last.pi, 3)})`, 'success');
+    appendLog(`PI: ${kind} beat #${last.ordinal} — PI = ${fmt(last.pi, 3)}, Pulse Amp = ${fmt(last.pulse_amp)}`);
+    toast(`${kind === 'native' ? 'Native' : 'Artificial'} beat added (PI = ${fmt(last.pi, 3)})`, 'success');
   } catch (err) {
     toast(err.message, 'error');
     appendLog('PI select error: ' + err.message);
@@ -998,6 +1124,15 @@ $('piAutoBtn').addEventListener('click', () => {
 });
 
 $('piPlot').addEventListener('click', async (e) => {
+  if (clickMode === 'pi_sync_tcd') {
+    clickMode = null;
+    $('piPlot').parentElement.classList.remove('clickable');
+    armSyncBtn('piSyncTcdBtn', false);
+    piSyncTcdTime = piChart.getClickX(e);
+    appendLog(`PI sync: TCD point at t=${piSyncTcdTime.toFixed(3)} s. Now pick the ABP point.`);
+    toast('TCD point set. Now pick the same beat on ABP.', 'info');
+    return;
+  }
   if (clickMode !== 'pi_auto') return;
   clickMode = null;
   $('piPlot').parentElement.classList.remove('clickable');
@@ -1046,11 +1181,11 @@ $('piDeselectBtn').addEventListener('click', async () => {
 });
 
 $('piClearBtn').addEventListener('click', async () => {
-  if (piEpochs.length && !confirm(`Clear all ${piEpochs.length} selections for this speed?\n\nThe saved session on disk is kept — use "Load Speed…" to restore them.`)) return;
+  if (piEpochs.length && !confirm(`Clear all ${piEpochs.length} PI beat(s) for this tag?`)) return;
   try {
     renderPI(await api('/api/pi/clear', { method: 'POST' }));
-    appendLog('PI: Cleared all selections.');
-    toast('Selections cleared', 'info');
+    appendLog('PI: Cleared all beats.');
+    toast('Beats cleared', 'info');
   } catch (err) { toast(err.message, 'error'); }
 });
 
@@ -1064,143 +1199,66 @@ $('piZoomBtn').addEventListener('click', () => {
 
 wireNavControls('pi', piChart);
 
-/* ── saved per-speed sessions ── */
-function openSpeedModal(sessions) {
-  const list = $('piSpeedList');
-  list.innerHTML = '';
-  sessions.forEach(s => {
-    const btn = document.createElement('button');
-    const parts = [s.speed ? 'Speed ' + s.speed : null, s.vessel || null].filter(Boolean);
-    const title = parts.length ? parts.join(' · ') : '(no speed/vessel)';
-    btn.innerHTML = `<strong>${title}</strong>` +
-      `<span class="speed-meta">${s.n_native} native · ${s.n_artificial} artificial · ${s.filename}</span>`;
-    btn.addEventListener('click', () => { closeSpeedModal(); loadPISession(s.filename); });
-    list.appendChild(btn);
-  });
-  $('piSpeedModal').classList.add('active');
-}
-function closeSpeedModal() { $('piSpeedModal').classList.remove('active'); }
-$('piSpeedCancel').addEventListener('click', closeSpeedModal);
-$('piSpeedModal').addEventListener('click', (e) => {
-  if (e.target === $('piSpeedModal')) closeSpeedModal();
-});
+/* ── TCD ↔ ABP synchronisation ── */
+let piSyncTcdTime = null;
 
-async function loadPISession(filename) {
-  showLoading();
-  try {
-    renderPI(await api('/api/pi/load_session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename }),
-    }));
-    appendLog(`PI: Loaded saved session ${filename}.`);
-    toast('Saved selections loaded', 'success');
-  } catch (err) {
-    toast(err.message, 'error');
-    appendLog('PI load error: ' + err.message);
-  }
-  hideLoading();
+function armSyncBtn(id, on) {
+  $(id).classList.toggle('arming', on);
 }
 
-$('piLoadSpeedBtn').addEventListener('click', async () => {
-  try {
-    const { sessions } = await api('/api/pi/sessions');
-    if (!sessions.length) { toast('No saved sessions for this recording', 'info'); return; }
-    openSpeedModal(sessions);
-  } catch (err) { toast(err.message, 'error'); }
+$('piSyncTcdBtn').addEventListener('click', () => {
+  clickMode = 'pi_sync_tcd';
+  armSyncBtn('piSyncTcdBtn', true); armSyncBtn('piSyncAbpBtn', false);
+  $('piPlot').parentElement.classList.add('clickable');
+  toast('Click the low point of an artificial beat on the TCD plot', 'info');
+  appendLog('PI sync: click the low point of an artificial beat on TCD.');
 });
 
-$('piLoadAllBtn').addEventListener('click', async () => {
-  showLoading();
-  try {
-    const { speeds } = await api('/api/pi/load_all');
-    piChart.setAllSpeeds(speeds);
-    const totN = speeds.reduce((a, s) => a + s.n_native, 0);
-    const totA = speeds.reduce((a, s) => a + s.n_artificial, 0);
-    appendLog(`PI: Overlaid ${speeds.length} speed session(s) — ${totN} native, ${totA} artificial (read-only view).`);
-    toast(`${speeds.length} speeds overlaid — read-only view`, 'info');
-  } catch (err) {
-    toast(err.message, 'error');
-    appendLog('PI load-all error: ' + err.message);
-  }
-  hideLoading();
+$('piSyncAbpBtn').addEventListener('click', () => {
+  clickMode = 'pi_sync_abp';
+  armSyncBtn('piSyncAbpBtn', true); armSyncBtn('piSyncTcdBtn', false);
+  $('piPlotAbp').parentElement.classList.add('clickable');
+  toast('Click the low point of the SAME beat on the ABP plot', 'info');
+  appendLog('PI sync: click the low point of the same beat on ABP.');
 });
 
-/* ── export ── */
-async function piExport() {
-  const form = new FormData();
-  form.append('patient_id', $('patientId').value || '');
-  form.append('speed', $('piSpeed').value || '');
-  form.append('vessel', $('piVessel').value || '');
-  const wb = $('piWorkbook').files[0];
-  if (wb) form.append('workbook', wb);
-
-  const result = await api('/api/pi/export', { method: 'POST', body: form });
-  const a = document.createElement('a');
-  a.href = '/api/download/' + result.filename;
-  a.download = result.filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  appendLog(`PI: Exported ${result.filename} ` +
-            `(${result.summary.n_native} native, ${result.summary.n_artificial} artificial).`);
-  return result;
-}
-
-$('piExportBtn').addEventListener('click', async () => {
+$('piPlotAbp').addEventListener('click', async (e) => {
+  if (clickMode !== 'pi_sync_abp') return;
+  clickMode = null;
+  $('piPlotAbp').parentElement.classList.remove('clickable');
+  armSyncBtn('piSyncAbpBtn', false);
+  if (piSyncTcdTime == null) { toast('Pick the TCD point first', 'info'); return; }
+  // The ABP plot is drawn shifted by the current shift; convert the click back
+  // to the ABP tracing's own (original) time before sending it.
+  const abpTime = piChart.getClickXOn('abp', e) - (piChart.abpShift || 0);
   showLoading();
   try {
-    await piExport();
-    toast('PI Demographics exported & downloaded', 'success');
-  } catch (err) {
-    toast(err.message, 'error');
-    appendLog('PI export error: ' + err.message);
-  }
-  hideLoading();
-});
-
-/* ── Save & Next Speed: export this speed, then start a clean one ── */
-$('piNextSpeedBtn').addEventListener('click', async () => {
-  showLoading();
-  try {
-    await piExport();
-  } catch (err) {
-    hideLoading();
-    toast(err.message, 'error');
-    appendLog('PI export error: ' + err.message);
-    return;
-  }
-  hideLoading();
-
-  // Cancelling the prompt leaves the selections intact, as PI.m does.
-  const next = prompt('Enter the next speed value:', '');
-  if (next == null || !next.trim()) {
-    appendLog('PI: Next speed cancelled — selections kept.');
-    return;
-  }
-
-  showLoading();
-  try {
-    const payload = await api('/api/pi/next_speed', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speed: next.trim() }),
+    const payload = await api('/api/pi/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tcd_time: piSyncTcdTime, abp_time: abpTime }),
     });
     renderPI(payload);
-    $('piSpeed').value = payload.speed;
-    appendLog(`PI: Ready for speed ${payload.speed}.`);
-
-    if (payload.existing_session &&
-        confirm(`Found saved selections for speed ${payload.speed}. Load them?`)) {
-      await loadPISession(payload.existing_session);
-    } else {
-      toast(`Ready for speed ${payload.speed}`, 'success');
-    }
+    appendLog(`PI: ABP synced to TCD — shift ${payload.abp_shift >= 0 ? '+' : ''}${payload.abp_shift.toFixed(3)} s.`);
+    toast(`ABP synced (shift ${payload.abp_shift.toFixed(3)} s)`, 'success');
   } catch (err) {
     toast(err.message, 'error');
-    appendLog('PI next-speed error: ' + err.message);
+    appendLog('PI sync error: ' + err.message);
   }
+  piSyncTcdTime = null;
   hideLoading();
+});
+
+$('piSyncResetBtn').addEventListener('click', async () => {
+  try {
+    renderPI(await api('/api/pi/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset: true }),
+    }));
+    piSyncTcdTime = null;
+    armSyncBtn('piSyncTcdBtn', false); armSyncBtn('piSyncAbpBtn', false);
+    appendLog('PI: ABP sync reset.');
+    toast('ABP sync reset', 'info');
+  } catch (err) { toast(err.message, 'error'); }
 });
 
 
@@ -1322,7 +1380,9 @@ async function loadCacvrSession(filename) {
     $('cacvrLabelInput').value = r.label;
     renderCacvrResults(r.summary);
     redrawCacvrSelections(r.loaded_selections);
-    appendLog(`CA/CVR: loaded ${tagWord()} "${r.label}".`);
+    if (r.pi) { renderPI(r.pi); await refreshPITrace(); }   // load PI window too
+    appendLog(`CA/CVR: loaded ${tagWord()} "${r.label}"` +
+              (r.pi ? ` (${r.pi.summary.n_native + r.pi.summary.n_artificial} PI beat(s)).` : '.'));
     toast(`Loaded ${tagWord()} ${r.label}`, 'success');
   } catch (err) {
     toast(err.message, 'error');
@@ -1358,6 +1418,7 @@ $('cacvrNextBtn').addEventListener('click', async () => {
     $('cvrResultBox').classList.add('hidden');
     caCharts.clearSelection();
     applyCvrSelections({});
+    try { renderPI(await api('/api/pi/state')); } catch {}   // PI cleared for the new tag
     appendLog(`CA/CVR: saved previous ${word.toLowerCase()}; ready for "${r.label}".`);
     if (r.existing_session &&
         confirm(`${word} "${r.label}" already has saved results. Load them?`)) {

@@ -839,6 +839,8 @@ class PIChart {
     this.onBrushChange = () => {};
     this.onViewChange = () => {};   // fires after zoom/pan so the host refetches
     this._syncing = false;          // guard against zoom-sync feedback loops
+    this.abpShift = 0;              // TCD->ABP display shift (seconds)
+    this._lastTrace = null;
   }
 
   init(data) {
@@ -923,10 +925,37 @@ class PIChart {
   }
 
   /* Swap in a freshly-fetched (higher-resolution) trace on both plots without
-     disturbing the epoch overlays that sit above them. */
+     disturbing the epoch overlays that sit above them. The ABP trace is drawn
+     shifted by `abpShift` so, after TCD->ABP sync, its beats line up under the
+     TCD beats. */
   setTrace(time, env, abp) {
+    this._lastTrace = { time, abp: abp || [] };
     if (this.chart) { this.chart.data.datasets[0].data = xyData(time, env); this.chart.update('none'); }
-    if (this.abpChart) { this.abpChart.data.datasets[0].data = xyData(time, abp || []); this.abpChart.update('none'); }
+    this._drawAbpTrace();
+  }
+
+  _drawAbpTrace() {
+    if (!this.abpChart || !this._lastTrace) return;
+    const { time, abp } = this._lastTrace;
+    const sh = this.abpShift || 0;
+    const pts = [];
+    for (let i = 0; i < time.length; i++) {
+      if (time[i] != null && abp[i] != null) pts.push({ x: time[i] + sh, y: abp[i] });
+    }
+    this.abpChart.data.datasets[0].data = pts;
+    this.abpChart.update('none');
+  }
+
+  setAbpShift(shift) {
+    this.abpShift = shift || 0;
+    this._drawAbpTrace();
+  }
+
+  getClickXOn(chartName, event) {
+    const c = chartName === 'abp' ? this.abpChart : this.chart;
+    if (!c) return null;
+    const rect = c.canvas.getBoundingClientRect();
+    return c.scales.x.getValueForPixel(event.clientX - rect.left);
   }
 
   /* ── brush API (mirrors CACharts / CVRCharts) — brushing is TCD-only ── */

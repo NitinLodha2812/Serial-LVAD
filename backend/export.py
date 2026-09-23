@@ -8,12 +8,10 @@ import json, os, re, shutil, tempfile, zipfile
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from .session_state import SessionState, SAMPLE_RATE, MODE_RAMPS, MODE_SERIAL
+from .session_state import (
+    SessionState, SAMPLE_RATE, MODE_RAMPS, MODE_SERIAL, GUI_VERSION,
+)
 from . import pi_analysis
-
-# Sheet PI.m reads from and writes back to.
-PI_SHEET = "PI Demographics"
-PI_LEAD_COLUMNS = ("PatientID", "SessionSpeed", "Vessel")
 
 
 def _nan_safe(v):
@@ -28,21 +26,22 @@ def _nan_safe(v):
 
 
 PROGRESS_FORMAT = "lvad_progress"
-PROGRESS_VERSION = 2
+PROGRESS_VERSION = 3   # v3: PI folded into each tag (pi_epochs with waveforms)
 
 
 def build_progress_payload(state: SessionState, sessions: list) -> dict:
     """
-    The reloadable progress snapshot: study mode + identity + every saved
-    CA/CVR session (results and selection ranges) + the current PI epochs.
-
-    `sessions` is the list of per-label session payloads from cacvr_sessions
-    (each a dict with "label", "results", "selections"). Kept as a list so
-    RAMPs speeds and Serial LVAD vessels both round-trip cleanly.
+    The reloadable progress snapshot: GUI version + study mode + identity +
+    every saved tag (CA/CVR results, selection ranges, and the PI beats that
+    ride on that tag). The PI beats keep their per-sample waveform so the PI
+    window can be redrawn on reopen. `sessions` is the list of per-label
+    session payloads from cacvr_sessions; kept as a list so RAMPs speeds and
+    Serial LVAD vessels both round-trip cleanly.
     """
-    payload = {
+    return {
         "format": PROGRESS_FORMAT,
         "version": PROGRESS_VERSION,
+        "gui_version": GUI_VERSION,
         "study_mode": state.study_mode,
         "patient_id": state.patient_id,
         "session": state.session,
@@ -53,24 +52,13 @@ def build_progress_payload(state: SessionState, sessions: list) -> dict:
                 "label": s.get("label") or "",
                 "results": _serialise_dict(s.get("results", {})),
                 "selections": _serialise_dict(s.get("selections", {})),
+                "pi_epochs": _serialise_dict(s.get("pi_epochs", []) or []),
+                "pi_abp_shift": s.get("pi_abp_shift", 0.0) or 0.0,
             }
             for s in sessions
         ],
         "log": state.log_lines,
     }
-    # PI metrics only (per-sample waveform stays out — recoverable from the raw
-    # recording, and would dwarf everything else here).
-    if state.pi_epochs:
-        payload["pi"] = {
-            "speed": state.pi_speed,
-            "vessel": state.pi_vessel,
-            "summary": pi_analysis.summarize(state.pi_epochs),
-            "epochs": [
-                _serialise_dict({k: v for k, v in e.items() if k not in ("time", "amp")})
-                for e in pi_analysis.numbered(state.pi_epochs)
-            ],
-        }
-    return payload
 
 
 def save_progress_json(state: SessionState, sessions: list, out_dir: str) -> str:
@@ -128,32 +116,29 @@ def parse_progress_payload(data: dict) -> dict:
                 "label": s.get("label", ""),
                 "results": s.get("results", {}) or {},
                 "selections": s.get("selections", {}) or {},
+                "pi_epochs": s.get("pi_epochs", []) or [],
+                "pi_abp_shift": s.get("pi_abp_shift", 0.0) or 0.0,
             })
     elif isinstance(cs, dict):
         for label, results in cs.items():
             sessions.append({
                 "label": "" if label == "nolabel" else label,
                 "results": results or {},
-                "selections": {},
+                "selections": {}, "pi_epochs": [], "pi_abp_shift": 0.0,
             })
     elif isinstance(data.get("results"), dict):
-        # Original single-session snapshot. PI (if present) is pulled out
-        # separately below, so exclude it from the CA/CVR results here.
         res = {k: v for k, v in data["results"].items() if k in ("CA", "CVR")}
         if any((res.get(a) or {}).get(v) for a in ("CA", "CVR") for v in ("MCA", "PCA")):
-            sessions.append({"label": session, "results": res, "selections": {}})
-
-    pi = data.get("pi")
-    if pi is None and isinstance(data.get("results"), dict):
-        pi = data["results"].get("PI")
+            sessions.append({"label": session, "results": res, "selections": {},
+                             "pi_epochs": [], "pi_abp_shift": 0.0})
 
     return {
+        "gui_version": data.get("gui_version"),
         "study_mode": study_mode,
         "patient_id": patient_id,
         "session": session,
         "base_name": base_name,
         "sessions": sessions,
-        "pi": pi,
     }
 
 
@@ -238,21 +223,34 @@ def _cvr_frame(cvr: dict):
     return pd.DataFrame(rows, columns=["Metric", "Value"]) if rows else None
 
 
-def pi_epochs_frame(epochs: list):
-    """PI tab = one row per beat, columns for the metrics (as in the PI table)."""
-    if not epochs:
+def pi_epochs_frame(tcd_epochs: list, abp_epochs: list = None):
+    """PI tab = one row per beat (as in the on-screen PI table). Columns are the
+    TCD metrics; if ABP epochs exist (after TCD->ABP sync) their metrics are
+    appended as ABP_* columns. Pulse amplitude (Hi-Lo) replaces pulse width."""
+    if not tcd_epochs:
         return None
+    abp_by_id = {e["id"]: e for e in (abp_epochs or [])}
     rows = []
-    for e in pi_analysis.numbered(epochs):
+    for e in pi_analysis.numbered(tcd_epochs):
         native = e["type"] == pi_analysis.NATIVE
-        rows.append({
+        row = {
             "Beat": ("Native #" if native else "Artificial #") + str(e["ordinal"]),
             "Type": "Native" if native else "Artificial",
             "Start_s": e.get("t_start"), "End_s": e.get("t_end"),
-            "Max": e.get("max"), "Min": e.get("min"), "Mean": e.get("mean"),
-            "PW_s": e.get("pw"), "PI": e.get("pi"),
-        })
-    cols = ["Beat", "Type", "Start_s", "End_s", "Max", "Min", "Mean", "PW_s", "PI"]
+            "TCD_Hi": e.get("max"), "TCD_Lo": e.get("min"), "TCD_Mean": e.get("mean"),
+            "TCD_PulseAmp": e.get("pulse_amp"), "TCD_PI": e.get("pi"),
+        }
+        a = abp_by_id.get(e["id"])
+        if a:
+            row.update({
+                "ABP_Hi": a.get("max"), "ABP_Lo": a.get("min"), "ABP_Mean": a.get("mean"),
+                "ABP_PulseAmp": a.get("pulse_amp"), "ABP_PI": a.get("pi"),
+            })
+        rows.append(row)
+    cols = ["Beat", "Type", "Start_s", "End_s",
+            "TCD_Hi", "TCD_Lo", "TCD_Mean", "TCD_PulseAmp", "TCD_PI"]
+    if any(abp_by_id.get(e["id"], {}).get("max") is not None for e in tcd_epochs):
+        cols += ["ABP_Hi", "ABP_Lo", "ABP_Mean", "ABP_PulseAmp", "ABP_PI"]
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -282,22 +280,20 @@ def _merge_cacvr_by_vessel(cacvr_sessions: list) -> dict:
     return out
 
 
-def _pi_epochs_by_vessel(pi_sessions: list) -> dict:
-    out = {"MCA": [], "PCA": []}
-    for p in pi_sessions:
-        v = (p.get("vessel") or "").strip().upper()
-        if v in out:
-            out[v].extend(p.get("epochs", []) or [])
-    return out
+def _pi_frame_for_session(s: dict):
+    """PI tab for one tag's session (TCD + ABP epochs it stored)."""
+    return pi_epochs_frame(s.get("pi_epochs", []) or [], s.get("pi_abp_epochs", []) or [])
 
 
-def _pi_epochs_for_speed(pi_sessions: list, speed: str) -> list:
-    target = (speed or "").strip().lower()
-    epochs = []
-    for p in pi_sessions:
-        if (p.get("speed") or "").strip().lower() == target:
-            epochs.extend(p.get("epochs", []) or [])
-    return epochs
+def _pi_frame_for_vessel(cacvr_sessions: list, vessel: str):
+    """Serial LVAD: the tag IS the vessel, so PI for a vessel comes from the tag
+    whose label matches (concatenated if more than one messy label matches)."""
+    tcd, abp = [], []
+    for s in cacvr_sessions:
+        if (s.get("label") or "").strip().upper() == vessel:
+            tcd.extend(s.get("pi_epochs", []) or [])
+            abp.extend(s.get("pi_abp_epochs", []) or [])
+    return pi_epochs_frame(tcd, abp)
 
 
 def save_excel(state: SessionState, out_dir: str) -> str:
@@ -336,7 +332,7 @@ def save_session_excel(results: dict, path: str) -> int:
     return n
 
 
-def export_all_cacvr(state: SessionState, cacvr_sessions: list, pi_sessions: list, out_dir: str):
+def export_all_cacvr(state: SessionState, cacvr_sessions: list, out_dir: str):
     """
     Bundle the whole study into one zip. Workbook layout is mode-specific:
 
@@ -345,9 +341,10 @@ def export_all_cacvr(state: SessionState, cacvr_sessions: list, pi_sessions: lis
                     (fewer if a vessel/analysis wasn't collected).
       RAMPs       — ONE workbook per speed, up to 3 tabs: CA, CVR, PI.
 
+    PI beats travel with each tag's session (there is no separate PI store);
+    the PI tab lists one row per beat with TCD (and, after sync, ABP) metrics.
     Plus a `*_Master.xlsx` (raw data + edits, written once, skipped after a
-    JSON reopen with no raw data) and a `*_progress.json`. The standalone
-    "PI Demographics" workbook is separate and unaffected.
+    JSON reopen with no raw data) and a `*_progress.json`.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     patient = _safe_stem(state.patient_id) or "patient"
@@ -377,7 +374,7 @@ def export_all_cacvr(state: SessionState, cacvr_sessions: list, pi_sessions: lis
                 frames = [
                     ("CA",  _ca_frame((r.get("CA") or {}).get("MCA"))),
                     ("CVR", _cvr_frame((r.get("CVR") or {}).get("MCA"))),
-                    ("PI",  pi_epochs_frame(_pi_epochs_for_speed(pi_sessions, label))),
+                    ("PI",  _pi_frame_for_session(s)),
                 ]
                 wbname = unique(f"{patient}_{_safe_stem(label) or 'speed'}.xlsx")
                 _workbook_from_frames(os.path.join(workdir, wbname), frames)
@@ -385,12 +382,11 @@ def export_all_cacvr(state: SessionState, cacvr_sessions: list, pi_sessions: lis
         else:
             # Serial LVAD: one workbook for the session, MCA/PCA × CA/CVR/PI.
             vessels = _merge_cacvr_by_vessel(cacvr_sessions)
-            pis = _pi_epochs_by_vessel(pi_sessions)
             frames = []
             for v in ("MCA", "PCA"):
                 frames.append((f"{v}_CA",  _ca_frame(vessels[v]["CA"])))
                 frames.append((f"{v}_CVR", _cvr_frame(vessels[v]["CVR"])))
-                frames.append((f"{v}_PI",  pi_epochs_frame(pis[v])))
+                frames.append((f"{v}_PI",  _pi_frame_for_vessel(cacvr_sessions, v)))
             sess = _safe_stem(state.session) or "session"
             wbname = unique(f"{patient}_{sess}.xlsx")
             _workbook_from_frames(os.path.join(workdir, wbname), frames)
@@ -420,59 +416,6 @@ def _write_progress_json(state: SessionState, sessions: list, path: str):
 
 def _safe_stem(s: str) -> str:
     return re.sub(r"[^\w.\-]", "_", (s or "").strip()) or "PI"
-
-
-def save_pi_excel(row: dict, out_dir: str,
-                  prior_path: str | None = None,
-                  prior_filename: str | None = None,
-                  fallback_stem: str = "PI") -> str:
-    """
-    Append one PI row to the "PI Demographics" sheet and write a new workbook.
-
-    PI.m opens an existing spreadsheet, adds the row, pads both sides with NaN
-    so old and new column sets line up, and saves under a timestamped name —
-    never overwriting the source. Same contract here, with two differences:
-    the prior workbook is optional (with none, the sheet is created fresh), and
-    any *other* sheets in that workbook are carried across rather than dropped,
-    which is what MATLAB's writetable does to them.
-    """
-    ts = datetime.now().strftime("%d%b%Y_%H%M%S")
-    other_sheets: dict[str, pd.DataFrame] = {}
-
-    if prior_path:
-        book = pd.read_excel(prior_path, sheet_name=None)
-        if PI_SHEET not in book:
-            raise ValueError(
-                f"Prior workbook has no '{PI_SHEET}' sheet "
-                f"(found: {', '.join(book) or 'no sheets'})."
-            )
-        old = book.pop(PI_SHEET)
-        other_sheets = book
-        stem = os.path.splitext(prior_filename or os.path.basename(prior_path))[0]
-        if "---" in stem:
-            stem = stem.split("---")[0]
-    else:
-        old = pd.DataFrame()
-        stem = fallback_stem
-
-    new_row = pd.DataFrame([row])
-    # Concatenating onto an empty frame warns and can coerce dtypes in pandas
-    # 2.x, so short-circuit the first-row case.
-    combined = new_row if old.empty else pd.concat([old, new_row], ignore_index=True)
-
-    # PI.m orders columns as the three IDs, then MATLAB's setdiff() output —
-    # which is sorted. Mirror that so appended rows always align.
-    lead = [c for c in PI_LEAD_COLUMNS if c in combined.columns]
-    rest = sorted(c for c in combined.columns if c not in lead)
-    combined = combined[lead + rest]
-
-    fname = f"{_safe_stem(stem)}---{ts}.xlsx"
-    path = os.path.join(out_dir, fname)
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        combined.to_excel(writer, sheet_name=PI_SHEET, index=False)
-        for name, df in other_sheets.items():
-            df.to_excel(writer, sheet_name=name, index=False)
-    return fname
 
 
 def serialise(d):

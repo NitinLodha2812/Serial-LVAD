@@ -996,3 +996,39 @@ body { padding-bottom: 40px; }
   font-family: var(--font-mono);
   margin-top: 2px;
 }
+/* ── select-mode segmented toggle (CA MX manual/auto) ── */
+.seg-toggle { display: flex; gap: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }
+.seg-toggle .seg {
+  flex: 1; padding: 7px 8px; font-size: .8rem; font-family: var(--font-body);
+  background: var(--surface); color: var(--text-muted); border: none; cursor: pointer;
+  border-right: 1px solid var(--border);
+}
+.seg-toggle .seg:last-child { border-right: none; }
+.seg-toggle .seg.active { background: var(--accent); color: #fff; font-weight: 600; }
+.seg-toggle .seg:disabled { cursor: default; opacity: .55; }
+
+/* ── PI TCD/ABP sync panel ── */
+.sync-panel { display: flex; flex-direction: column; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; }
+.sync-header { font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); }
+.sync-readout { font-size: .8rem; color: var(--text-muted); }
+.sync-readout b { font-family: var(--font-mono); color: var(--text); }
+.sync-panel .btn.arming { background: var(--accent); color: #fff; }
+
+/* ── PI split epoch tables ── */
+.epoch-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.epoch-col-title { font-size: .78rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+.epoch-sync-note { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--warn); }
+@media (max-width: 900px) { .epoch-tables { grid-template-columns: 1fr; } }
+
+/* ── marks select-all header ── */
+.marks-all { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.marks-all input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+/* ── instructions buttons + pop-up ── */
+.instr-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.instr-btn { justify-content: center; }
+.instr-body { padding: 4px 18px 12px; font-size: .88rem; line-height: 1.5; color: var(--text); }
+.instr-body h4 { margin: 10px 0 4px; font-size: .95rem; }
+.instr-body ul { margin: 0 0 8px 18px; }
+.instr-body li { margin: 3px 0; }
+.instr-body .instr-todo { color: var(--text-muted); font-style: italic; }

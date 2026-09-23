@@ -102,12 +102,14 @@
       <!-- instructions -->
       <div class="card">
         <div class="card-header"><h3>Instructions</h3></div>
-        <div class="card-body instructions-box">
-          <strong>1.</strong> Load a study with <strong>Load Serial LVAD Data</strong> or <strong>Load RAMPs Data</strong>.<br>
-          <strong>2.</strong> <strong>CA</strong> tab: select a 5-minute window and compute MX (or a 3-minute MFV-only epoch).<br>
-          <strong>3.</strong> <strong>CVR</strong> tab: select the TCD baseline/hypercapnia windows and the two CO2 points, then compute CVR.<br>
-          <strong>4.</strong> Set the <strong>Vessel</strong> (Serial LVAD) or <strong>Speed</strong> (RAMPs) tag above and <strong>Save &amp; Next</strong> to process the next one.<br>
-          <strong>5.</strong> <strong>Export All Study</strong> when the whole study is done, or <strong>Save Progress</strong> to reopen and continue later.
+        <div class="card-body">
+          <p class="card-note">Open detailed instructions and workflow tips:</p>
+          <div class="instr-grid">
+            <button class="btn instr-btn" data-instr="ca">CA tab</button>
+            <button class="btn instr-btn" data-instr="cvr">CVR tab</button>
+            <button class="btn instr-btn" data-instr="pi">PI tab</button>
+            <button class="btn instr-btn" data-instr="misc">Miscellaneous</button>
+          </div>
         </div>
       </div>
 
@@ -138,9 +140,13 @@
         </div>
       </div>
       <div class="controls-sidebar">
+        <div class="seg-toggle" id="caSelMode">
+          <button class="seg active" id="caSelAuto" data-mode="auto" disabled>Auto 5-min</button>
+          <button class="seg" id="caSelManual" data-mode="manual" disabled>Manual (drag)</button>
+        </div>
         <button class="btn btn-primary" id="caSelectBtn" disabled>Select Start (5-min)</button>
         <button class="btn" id="caCalcBtn" disabled>Calculate MX</button>
-        <button class="btn" id="caMfvBtn" disabled>Calculate MFV only (3-min)</button>
+        <button class="btn" id="caMfvBtn" disabled>Calculate MFV only (30-s)</button>
         <!-- MX / Mean MFV shown right under the calc buttons -->
         <div id="caResultBox" class="hidden">
           <div class="result-grid">
@@ -174,7 +180,9 @@
         </div>
         <div class="section-divider"></div>
         <div class="marks-panel" id="caMarksPanel">
-          <div class="marks-header">Marks</div>
+          <div class="marks-header">
+            <label class="marks-all"><input type="checkbox" id="caMarksAll" checked> Marks</label>
+          </div>
           <div class="marks-list" id="caMarksList"></div>
         </div>
       </div>
@@ -207,6 +215,21 @@
           <span>Baseline CO2: <b id="cvrCo2BaseVal">—</b></span>
           <span>Hypercapnia CO2: <b id="cvrCo2HypVal">—</b></span>
           <span>Delta CO2: <b id="cvrCo2Delta">—</b></span>
+        </div>
+
+        <!-- plot windowing (zoom / pan) kept up near the selection controls -->
+        <div class="section-divider"></div>
+        <select class="btn" id="cvrZoomMenu" disabled>
+          <option value="home">Zoom Home</option>
+          <option value="scale5">Scale to 5 min</option>
+        </select>
+        <button class="btn btn-sm" id="cvrZoomBtn" disabled>Apply Zoom</button>
+        <div class="nav-controls">
+          <button class="btn btn-sm nav-btn" id="cvrYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
+          <button class="btn btn-sm nav-btn" id="cvrYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
+          <button class="btn btn-sm nav-btn" id="cvrYReset" title="Reset Y axis" disabled>Y ⟲</button>
+          <button class="btn btn-sm nav-btn" id="cvrPanL" title="Pan left (same window width)" disabled>◀</button>
+          <button class="btn btn-sm nav-btn" id="cvrPanR" title="Pan right (same window width)" disabled>▶</button>
         </div>
 
         <div class="section-divider"></div>
@@ -244,21 +267,10 @@
         <button class="btn btn-danger" id="cvrNanBtn" disabled>Replace with NaN</button>
         <button class="btn btn-sm" id="cvrBrushClearBtn" disabled>Clear Brush</button>
         <div class="section-divider"></div>
-        <select class="btn" id="cvrZoomMenu" disabled>
-          <option value="home">Zoom Home</option>
-          <option value="scale5">Scale to 5 min</option>
-        </select>
-        <button class="btn btn-sm" id="cvrZoomBtn" disabled>Apply Zoom</button>
-        <div class="nav-controls">
-          <button class="btn btn-sm nav-btn" id="cvrYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
-          <button class="btn btn-sm nav-btn" id="cvrYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
-          <button class="btn btn-sm nav-btn" id="cvrYReset" title="Reset Y axis" disabled>Y ⟲</button>
-          <button class="btn btn-sm nav-btn" id="cvrPanL" title="Pan left (same window width)" disabled>◀</button>
-          <button class="btn btn-sm nav-btn" id="cvrPanR" title="Pan right (same window width)" disabled>▶</button>
-        </div>
-        <div class="section-divider"></div>
         <div class="marks-panel" id="cvrMarksPanel">
-          <div class="marks-header">Marks</div>
+          <div class="marks-header">
+            <label class="marks-all"><input type="checkbox" id="cvrMarksAll" checked> Marks</label>
+          </div>
           <div class="marks-list" id="cvrMarksList"></div>
         </div>
       </div>
@@ -285,42 +297,52 @@
           <div class="plot-wrap short"><canvas id="piPlotAbp"></canvas></div>
         </div>
         <div class="card">
-          <div class="card-header"><h3>Selected Epochs</h3></div>
+          <div class="card-header"><h3>Selected Beats</h3></div>
           <div class="card-body">
-            <div class="epoch-table-wrap">
-              <table class="epoch-table" id="piEpochTable">
-                <thead>
-                  <tr>
-                    <th style="width:28px;"><input type="checkbox" id="piEpochAll" title="Select all"></th>
-                    <th>Epoch</th><th>Start (s)</th><th>End (s)</th>
-                    <th>Hi</th><th>Lo</th><th>Mean</th><th>PW (s)</th><th>PI</th>
-                  </tr>
-                </thead>
-                <tbody id="piEpochBody">
-                  <tr class="epoch-empty"><td colspan="9">No epochs selected yet.</td></tr>
-                </tbody>
-              </table>
+            <div class="epoch-tables">
+              <div class="epoch-col">
+                <div class="epoch-col-title">TCD epochs</div>
+                <div class="epoch-table-wrap">
+                  <table class="epoch-table" id="piTcdTable">
+                    <thead>
+                      <tr>
+                        <th style="width:24px;"><input type="checkbox" id="piEpochAll" title="Select all"></th>
+                        <th>Beat</th><th>Start</th><th>End</th>
+                        <th>Hi</th><th>Lo</th><th>Mean</th><th>Pulse Amp</th><th>PI</th>
+                      </tr>
+                    </thead>
+                    <tbody id="piEpochBody">
+                      <tr class="epoch-empty"><td colspan="9">No beats selected yet.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="epoch-col">
+                <div class="epoch-col-title">ABP epochs <span class="epoch-sync-note" id="piAbpSyncNote">(sync ABP to see values)</span></div>
+                <div class="epoch-table-wrap">
+                  <table class="epoch-table" id="piAbpTable">
+                    <thead>
+                      <tr>
+                        <th>Beat</th><th>Start</th><th>End</th>
+                        <th>Hi</th><th>Lo</th><th>Mean</th><th>Pulse Amp</th><th>PI</th>
+                      </tr>
+                    </thead>
+                    <tbody id="piAbpBody">
+                      <tr class="epoch-empty"><td colspan="8">No ABP epochs.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
             <div class="epoch-actions">
               <button class="btn btn-danger btn-sm" id="piDeselectBtn" disabled>Remove Checked</button>
-              <span class="epoch-note">PI = (Hi − Lo) / Mean &nbsp;·&nbsp; PW = epoch duration</span>
+              <span class="epoch-note">PI = Pulse Amp / Mean &nbsp;·&nbsp; Pulse Amp = Hi − Lo &nbsp;·&nbsp; Mean = ⅓·Hi + ⅔·Lo</span>
             </div>
           </div>
         </div>
       </div>
 
       <div class="controls-sidebar">
-        <div class="pi-fields">
-          <div class="pi-field">
-            <label for="piSpeed">Session / Speed</label>
-            <input type="text" id="piSpeed" placeholder="e.g. 1" disabled>
-          </div>
-          <div class="pi-field">
-            <label for="piVessel">Vessel</label>
-            <input type="text" id="piVessel" placeholder="e.g. MCA" disabled>
-          </div>
-        </div>
-
         <button class="btn" id="piBrushBtn" disabled>Brush: ON</button>
         <button class="btn btn-native" id="piNativeBtn" disabled>Select Native</button>
         <button class="btn btn-artificial" id="piArtificialBtn" disabled>Select Artificial</button>
@@ -335,6 +357,17 @@
 
         <button class="btn" id="piUndoBtn" disabled>Undo Last</button>
         <button class="btn btn-danger" id="piClearBtn" disabled>Clear All Selections</button>
+
+        <div class="section-divider"></div>
+
+        <!-- TCD → ABP synchronisation -->
+        <div class="sync-panel">
+          <div class="sync-header">ABP ↔ TCD sync</div>
+          <button class="btn btn-sm" id="piSyncTcdBtn" disabled>1. Pick low point on TCD</button>
+          <button class="btn btn-sm" id="piSyncAbpBtn" disabled>2. Pick low point on ABP</button>
+          <div class="sync-readout">shift: <b id="piSyncShift">0.000 s</b></div>
+          <button class="btn btn-sm" id="piSyncResetBtn" disabled>Reset sync</button>
+        </div>
 
         <div class="section-divider"></div>
 
@@ -354,20 +387,6 @@
 
         <div class="section-divider"></div>
 
-        <button class="btn" id="piLoadSpeedBtn" disabled>Load Speed…</button>
-        <button class="btn" id="piLoadAllBtn" disabled>Load All Speeds</button>
-        <button class="btn" id="piNextSpeedBtn" disabled>Save &amp; Next Speed</button>
-
-        <div class="section-divider"></div>
-
-        <div class="pi-field">
-          <label for="piWorkbook">Prior workbook (optional)</label>
-          <input type="file" id="piWorkbook" accept=".xlsx,.xls" disabled>
-        </div>
-        <button class="btn btn-primary" id="piExportBtn" disabled>Export to Excel</button>
-
-        <div class="section-divider"></div>
-
         <div class="result-grid">
           <div class="result-box result-native">
             <div class="result-label">Native</div>
@@ -382,22 +401,22 @@
         </div>
 
         <div class="marks-panel" id="piMarksPanel">
-          <div class="marks-header">Marks</div>
+          <div class="marks-header">
+            <label class="marks-all"><input type="checkbox" id="piMarksAll" checked> Marks</label>
+          </div>
           <div class="marks-list" id="piMarksList"></div>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ── PI: load-speed picker modal ── -->
-  <div class="modal-backdrop" id="piSpeedModal">
+  <!-- ── Instructions pop-up ── -->
+  <div class="modal-backdrop" id="instrModal">
     <div class="modal">
-      <div class="modal-header">Load Saved Speed</div>
-      <div class="modal-body">
-        <div class="speed-list" id="piSpeedList"></div>
-      </div>
+      <div class="modal-header" id="instrTitle">Instructions</div>
+      <div class="modal-body"><div class="instr-body" id="instrBody"></div></div>
       <div class="modal-footer">
-        <button class="btn btn-sm" id="piSpeedCancel">Cancel</button>
+        <button class="btn btn-sm" id="instrClose">Close</button>
       </div>
     </div>
   </div>
