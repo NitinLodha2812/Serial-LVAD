@@ -395,19 +395,46 @@ $('jsonInput').addEventListener('change', async (e) => {
   form.append('file', file);
   try {
     const r = await api('/api/reopen', { method: 'POST', body: form });
-    sessionData = null;   // no raw waveform — plots stay empty
     applyStudyMode(r.study_mode);
     $('patientId').value = r.patient_id;
     $('patientId').disabled = false;
-    // Working save/load/export works on restored results; analysis tabs need
-    // the raw recording, so leave them disabled until it is loaded.
-    enableMainSave(true);
     $('cacvrLabelInput').value = r.current_label || '';
     $('statusDot').classList.add('loaded');
-    $('statusText').textContent = `${r.patient_id} — reopened (${r.n_sessions} tag${r.n_sessions === 1 ? '' : 's'}, no raw data)`;
     appendLog(`Reopened ${r.patient_id} [${r.study_mode}] — restored ${r.n_sessions} tag(s): ${r.restored_labels.join(', ')}.`);
     if (r.pi_epochs) appendLog(`(Progress file also carried ${r.pi_epochs} PI epoch metric(s).)`);
-    appendLog('Load the original recording to see plots and re-select. Use "Load ' + tagWord() + '…" to review restored results.');
+
+    if (r.has_raw) {
+      // A recording was already loaded: keep it so the restored study is
+      // plottable and the operator can keep analysing right away.
+      sessionData = r.overview;
+      caCharts.init(sessionData);
+      cvrCharts.init(sessionData);
+      piChart.init(sessionData);
+      populateMarks('ca', sessionData);
+      populateMarks('cvr', sessionData);
+      populateMarks('pi', sessionData);
+      enableCA(true); enableCVR(true); enablePI(true);
+      enableMainSave(true);
+      updateStatus(true);
+      initAbpSource(sessionData);
+      await initPITab();
+      await initCacvrSession();
+      // Draw the first restored tag's windows and PI on top of the init above.
+      redrawCacvrSelections(r.loaded_selections);
+      await refreshCvrSelections();
+      if (r.pi) { renderPI(r.pi); await refreshPITrace(); }
+      $('statusText').textContent = `${r.patient_id} — reopened (${r.n_sessions} tag${r.n_sessions === 1 ? '' : 's'}, recording kept)`;
+      appendLog('Recording still loaded — plots restored. Use "Load ' + tagWord() + '…" to review other tags, or pick the next ' + tagWord().toLowerCase() + ' to continue.');
+    } else {
+      // No raw waveform yet — plots stay empty until the recording is loaded.
+      sessionData = null;
+      // Working save/load/export works on restored results; analysis tabs need
+      // the raw recording, so keep them disabled until it is loaded.
+      enableCA(false); enableCVR(false); enablePI(false);
+      enableMainSave(true);
+      $('statusText').textContent = `${r.patient_id} — reopened (${r.n_sessions} tag${r.n_sessions === 1 ? '' : 's'}, no raw data)`;
+      appendLog('Load the original recording to see plots and re-select. Use "Load ' + tagWord() + '…" to review restored results.');
+    }
     toast(`Reopened ${r.n_sessions} saved tag(s)`, 'success');
   } catch (err) {
     toast(err.message, 'error');

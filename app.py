@@ -229,6 +229,30 @@ def api_reopen():
     new_state.pi_abp_shift = float(first.get("pi_abp_shift", 0.0) or 0.0)
     new_state.log(f"Reopened {len(restored)} tag(s); {total_pi} PI beat(s) restored.")
 
+    # If a raw recording is already loaded, keep it so the restored study is
+    # immediately plottable and the operator can carry on analysing (pick the
+    # next vessel/speed, re-select, recalculate). Without this the reopen would
+    # blank the waveform and the next Select/Calculate throws a server error on
+    # the empty data arrays. The intended order is still "load recording, then
+    # load progress"; loading progress first and the recording afterwards also
+    # works, just with one extra "Load <tag>" to review restored results.
+    overview = None
+    if state is not None and state.has_recording():
+        new_state.adopt_recording_from(state)
+        if state.base_name and new_state.base_name and state.base_name != new_state.base_name:
+            new_state.log(
+                f"Note: the loaded recording ({state.base_name!r}) and the progress "
+                f"file ({new_state.base_name!r}) have different names — restoring "
+                f"progress onto the loaded recording; confirm they are the same study."
+            )
+        else:
+            new_state.log("Kept the loaded recording; plots and analysis stay available.")
+        try:
+            overview = new_state.get_overview_json()
+        except Exception as e:
+            new_state.log(f"Reopen: could not rebuild plot data — {e}")
+            overview = None
+
     state = new_state
     return jsonify({
         "reopened": True,
@@ -241,6 +265,13 @@ def api_reopen():
         "n_sessions": len(restored),
         "current_label": state.cacvr_speed,
         "pi_epochs": total_pi,
+        # When a recording is already loaded, hand back everything the normal
+        # load flow needs so the frontend can draw the plots and restore the
+        # first tag's windows/PI without a second round-trip.
+        "has_raw": overview is not None,
+        "overview": overview,
+        "loaded_selections": first.get("selections", {}) if overview else {},
+        "pi": _pi_payload() if overview else None,
         "load_log": list(state.log_lines),
     })
 

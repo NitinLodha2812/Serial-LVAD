@@ -315,11 +315,19 @@ restores every tag's CA/CVR results **and PI beats**, so you can review them,
 load a tag, or re-export. The JSON is **version-stamped** (`gui_version`) so
 future changes stay backward compatible; it reads current and older progress
 files and infers the study (RAMPs vs Serial LVAD) from files saved before study
-modes existed. The raw waveform is **not** stored, so the plots stay empty until
-you load the original recording; because the restored tags are keyed by the
-recording's name, loading that recording afterwards lines them straight back up.
-Then **Load Vessel/Speed** on the Main screen restores that tag's CA, CVR, and PI
-windows together. (Only the JSON is used for reopening, never the Excel files.)
+modes existed.
+
+The recommended order is **load the original recording first, then Load Progress
+(JSON)**: the recording is kept, so the plots are drawn, the first restored tag's
+window is shown, and you can carry straight on (pick the next vessel/speed, brush,
+recalculate, save) without any error. **Load Vessel/Speed** switches between the
+restored tags to review each one's CA, CVR, and PI.
+
+Loading the JSON *before* the recording also works: the raw waveform is not stored
+in the JSON, so the plots stay empty until you load the recording, and because the
+restored tags are keyed by the recording's name, loading it afterwards lines them
+back up (then use **Load Vessel/Speed** to pull a tag's results back onto the
+plots). Either way, only the JSON is used for reopening, never the Excel files.
 
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*

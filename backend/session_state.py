@@ -275,6 +275,29 @@ class SessionState:
         self.log_lines.append(line)
         print(line)
 
+    # The "recording" is everything parsed from the raw .txt — the waveform,
+    # the raw table (for the master sheet), the marks, and the resolved ABP
+    # source. It is distinct from the analysis results and the study identity,
+    # so it can be copied wholesale onto a state restored from a progress JSON.
+    _RECORDING_FIELDS = (
+        "raw_path", "raw_headers", "raw_rows", "column_positions",
+        "time", "mean_u", "env_u", "abp", "etco2", "co2",
+        "abp_candidates", "abp_source_index", "marks_labels", "marks_times",
+    )
+
+    def has_recording(self) -> bool:
+        """True once a raw recording is loaded (a waveform is present)."""
+        return self.time is not None and len(self.time) > 0
+
+    def adopt_recording_from(self, other: "SessionState"):
+        """Copy the raw recording (waveform, raw table, marks, ABP source) from
+        another state, leaving this state's identity and analysis results
+        untouched. Used when a progress JSON is reopened while a recording is
+        already loaded, so the restored study stays plottable and the operator
+        can keep analysing instead of hitting an empty-waveform server error."""
+        for f in self._RECORDING_FIELDS:
+            setattr(self, f, getattr(other, f))
+
     # ------------------------------------------------------------------ load
     def load_txt(self, filepath: str, filename: str):
         """Parse a comma-delimited TXT/CSV — uses pandas for speed."""
