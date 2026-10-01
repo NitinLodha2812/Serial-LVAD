@@ -77,6 +77,23 @@ def _current_vessel():
     return lbl if lbl in ("MCA", "PCA") else "MCA"
 
 
+def _require_recording():
+    """Guard for endpoints that index the raw waveform (CA/CVR/PI selections,
+    calculations, NaN edits). Returns a clean 400 response if no recording is
+    loaded, else None. Without this a missing waveform (e.g. a progress JSON
+    reopened on its own, with no recording loaded) makes these endpoints index
+    an empty array and raise a 500 traceback instead of a helpful message."""
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    if not state.has_recording():
+        return jsonify({"error": (
+            "No recording loaded, so there is nothing to select on. Load the "
+            "original .txt/.csv recording first (then reopen the progress JSON "
+            "to keep your restored results and carry on)."
+        )}), 400
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  PAGES
 # ═══════════════════════════════════════════════════════════════════════
@@ -282,8 +299,9 @@ def api_reopen():
 
 @app.route("/api/range")
 def api_range():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     start = float(request.args.get("start", 0))
     end = float(request.args.get("end", state.time[-1]))
     return jsonify(state.get_range_json(start, end))
@@ -295,8 +313,9 @@ def api_range():
 
 @app.route("/api/ca/select", methods=["POST"])
 def api_ca_select():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json()
     start_time = float(body.get("start_time", 0))
@@ -366,8 +385,9 @@ def api_ca_select_manual():
     under 5 minutes can still be included. NaN samples are preserved so the
     windowing inside compute_mx stays aligned in wall-clock time.
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     body = request.get_json() or {}
     try:
         start = float(body["start_time"]); end = float(body["end_time"])
@@ -422,8 +442,9 @@ def api_ca_clear():
 
 @app.route("/api/ca/calculate", methods=["POST"])
 def api_ca_calculate():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     if state.ca_selection is None:
         return jsonify({"error": "No selection. Click Select Start first."}), 400
 
@@ -493,8 +514,9 @@ def api_ca_mfv_only():
     brushed-out data), and average them. There is no MX — the result fills the
     Mean MFV box while the MX box stays empty.
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json() or {}
     start_time = float(body.get("start_time", 0))
@@ -562,8 +584,9 @@ def api_ca_mfv_only():
 
 @app.route("/api/cvr/select_baseline", methods=["POST"])
 def api_cvr_select_baseline():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json()
     start_time = float(body.get("start_time", 0))
@@ -617,8 +640,9 @@ def api_cvr_select_baseline():
 
 @app.route("/api/cvr/select_hypercapnia", methods=["POST"])
 def api_cvr_select_hypercapnia():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json()
     start_time = float(body.get("start_time", 0))
@@ -681,8 +705,9 @@ def api_cvr_select_co2_point():
 
     Body: { "which": "baseline" | "hypercapnia", "time": <seconds> }
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json() or {}
     which = str(body.get("which", "")).lower()
@@ -791,8 +816,9 @@ def api_cvr_clear():
 
 @app.route("/api/cvr/calculate", methods=["POST"])
 def api_cvr_calculate():
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     if state.cvr_baseline is None or state.cvr_hypercap is None:
         return jsonify({"error": "Both baseline and hypercapnia TCD selections are required."}), 400
     if state.cvr_co2_baseline is None or state.cvr_co2_hypercap is None:
@@ -876,8 +902,9 @@ def api_edit_nan():
     falls inside it become NaN. This preserves the time axis (no row is
     removed) and propagates to plots, CA/CVR calculations, and exports.
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json() or {}
     signal = body.get("signal")
@@ -952,8 +979,9 @@ def _pi_autosave():
 @app.route("/api/pi/trace")
 def api_pi_trace():
     """Envelope trace for the visible window, decimated only as needed."""
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     start = float(request.args.get("start", 0))
     end = float(request.args.get("end", state.time[-1] if len(state.time) else 0))
     try:
@@ -1014,8 +1042,9 @@ def api_pi_select():
     full-resolution envelope, not from whatever the chart happened to be
     displaying, so a decimated view never truncates an epoch.
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
 
     body = request.get_json() or {}
     kind = str(body.get("type", "")).lower()
@@ -1051,8 +1080,9 @@ def api_pi_auto_select():
     right edge of the current view — PI.m's autoSelectArtificial. Pump beats are
     metronomic, so one click plus the pump period captures them all.
     """
-    if state is None:
-        return jsonify({"error": "No data loaded"}), 400
+    guard = _require_recording()
+    if guard:
+        return guard
     if len(state.time) == 0:
         return jsonify({"error": "No data loaded"}), 400
 
