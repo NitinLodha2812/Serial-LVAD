@@ -1012,47 +1012,40 @@ function renderPI(payload) {
   $('piNativePI').textContent = 'PI ' + fmt(s.mean_pi_native);
   $('piArtificialPI').textContent = 'PI ' + fmt(s.mean_pi_artificial);
 
-  // Running averages over all selected beats (auto-updates on every change).
-  const av = (cls, m) => (s['avg_' + cls] || {})[m];
-  const fillAvg = (cls, suffix) => {
-    $('avg' + suffix + 'Hi').textContent = fmt(av(cls, 'max'));
-    $('avg' + suffix + 'Lo').textContent = fmt(av(cls, 'min'));
-    $('avg' + suffix + 'Mean').textContent = fmt(av(cls, 'mean'));
-    $('avg' + suffix + 'Pa').textContent = fmt(av(cls, 'pulse_amp'));
-    $('avg' + suffix + 'Pi').textContent = fmt(av(cls, 'pi'), 3);
-  };
-  fillAvg('native', 'Nat');
-  fillAvg('artificial', 'Art');
-
   const shift = payload.abp_shift || 0;
   $('piSyncShift').textContent = shift.toFixed(3) + ' s';
   $('piAbpSyncNote').textContent = shift ? `(shift ${shift >= 0 ? '+' : ''}${shift.toFixed(3)} s)`
                                          : '(sync ABP to see values)';
 
   $('piUndoBtn').disabled = piEpochs.length === 0;
-  renderPITcdTable();
+  renderPIBeatTables(s);
   renderPIAbpTable();
 }
 
 const PI_LABEL = (e) => (e.type === 'native' ? 'Native #' : 'Artificial #') + e.ordinal;
 
-function renderPITcdTable() {
-  const body = $('piEpochBody');
+// One beat table (native or artificial), with a trailing averages row. The
+// artificial table omits the Mean column — an artificial beat has no mean of its
+// own; its PI uses the average of the native means instead.
+function renderPIBeatTable(kind, bodyId, allId, emptyCols, avg) {
+  const body = $(bodyId);
   body.innerHTML = '';
-  if (!piEpochs.length) {
-    body.innerHTML = '<tr class="epoch-empty"><td colspan="9">No beats selected yet.</td></tr>';
-    $('piEpochAll').checked = false;
-    $('piDeselectBtn').disabled = true;
+  const hasMean = kind === 'native';
+  const rows = piEpochs.filter(e => e.type === kind);
+  if (!rows.length) {
+    body.innerHTML = `<tr class="epoch-empty"><td colspan="${emptyCols}">No ${kind} beats selected yet.</td></tr>`;
+    $(allId).checked = false;
     return;
   }
-  for (const e of piEpochs) {
+  for (const e of rows) {
     const tr = document.createElement('tr');
-    tr.className = e.type === 'native' ? 'row-native' : 'row-artificial';
+    tr.className = kind === 'native' ? 'row-native' : 'row-artificial';
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.dataset.id = e.id;
     cb.addEventListener('change', updatePIDeselectState);
-    const cells = [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end),
-                   fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)];
+    const cells = hasMean
+      ? [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)]
+      : [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.pulse_amp), fmt(e.pi, 3)];
     cells.forEach((text, i) => {
       const td = document.createElement('td');
       if (i === 0) td.appendChild(cb); else td.textContent = text;
@@ -1060,7 +1053,21 @@ function renderPITcdTable() {
     });
     body.appendChild(tr);
   }
-  $('piEpochAll').checked = false;
+  // Averages row at the bottom (average of the 5 variables for this class).
+  const a = avg || {};
+  const avgCells = hasMean
+    ? ['', 'Average', '', '', fmt(a.max), fmt(a.min), fmt(a.mean), fmt(a.pulse_amp), fmt(a.pi, 3)]
+    : ['', 'Average', '', '', fmt(a.max), fmt(a.min), fmt(a.pulse_amp), fmt(a.pi, 3)];
+  const tr = document.createElement('tr');
+  tr.className = 'epoch-avg';
+  avgCells.forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); });
+  body.appendChild(tr);
+  $(allId).checked = false;
+}
+
+function renderPIBeatTables(summary) {
+  renderPIBeatTable('native', 'piNativeBody', 'piNativeAll', 9, summary.avg_native);
+  renderPIBeatTable('artificial', 'piArtBody', 'piArtAll', 8, summary.avg_artificial);
   updatePIDeselectState();
 }
 
@@ -1085,18 +1092,22 @@ function renderPIAbpTable() {
 }
 
 function checkedEpochIds() {
-  return [...$('piEpochBody').querySelectorAll('input[type="checkbox"]:checked')]
-    .map(cb => parseInt(cb.dataset.id, 10));
+  return ['piNativeBody', 'piArtBody'].flatMap(id =>
+    [...$(id).querySelectorAll('input[type="checkbox"]:checked')]
+      .map(cb => parseInt(cb.dataset.id, 10)));
 }
 
 function updatePIDeselectState() {
   $('piDeselectBtn').disabled = checkedEpochIds().length === 0;
 }
 
-$('piEpochAll').addEventListener('change', (e) => {
-  $('piEpochBody').querySelectorAll('input[type="checkbox"]')
-    .forEach(cb => { cb.checked = e.target.checked; });
-  updatePIDeselectState();
+// Per-table select-all (one checkbox in each beat table's header).
+[['piNativeAll', 'piNativeBody'], ['piArtAll', 'piArtBody']].forEach(([allId, bodyId]) => {
+  $(allId).addEventListener('change', (e) => {
+    $(bodyId).querySelectorAll('input[type="checkbox"]')
+      .forEach(cb => { cb.checked = e.target.checked; });
+    updatePIDeselectState();
+  });
 });
 
 /* ── first-load setup ── */

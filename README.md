@@ -329,6 +329,11 @@ restored tags are keyed by the recording's name, loading it afterwards lines the
 back up (then use **Load Vessel/Speed** to pull a tag's results back onto the
 plots). Either way, only the JSON is used for reopening, never the Excel files.
 
+Loading a tag restores its **CA/CVR selection windows** into the working state,
+not just the result numbers, so switching between tags (or finishing a CA after a
+CVR, and the reverse) keeps every tag's shaded windows intact instead of silently
+dropping them on the next auto-save.
+
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*
 is echoed visually onto the same signal's plot on the other tabs.
@@ -363,18 +368,26 @@ is saved, loaded, and exported with CA and CVR.
 3. **Auto-Select Artificial** places a beat every 2 s, each spanning
    **−0.15 s before to +0.20 s after** the peak (0.35 s total), from the clicked
    point to the right edge of the view.
-4. **Undo Last** drops the most recent beat. Tick rows in the *TCD epochs* table
-   and **Remove Checked** to delete specific ones; **Clear All Selections** empties
-   the tag's beats.
+4. **Undo Last** drops the most recent beat. Tick rows in either beat table and
+   **Remove Checked** to delete specific ones (each table has its own select-all);
+   **Clear All Selections** empties the tag's beats.
+
+Selected beats are split into a **Native beats** table and an **Artificial beats**
+table, and each table ends with an **Average** row holding the mean of its columns.
 
 Per beat the tables report:
 
-| Column | Meaning |
-|--------|---------|
-| `Hi` / `Lo` | max, min of the signal over the beat |
-| `Pulse Amp` | `Hi − Lo` |
-| `Mean` | `⅓·Hi + ⅔·Lo` (weighted, not the sample mean) |
-| `PI` | `Pulse Amp / Mean` |
+| Column | Native | Artificial |
+|--------|--------|------------|
+| `Hi` / `Lo` | max, min over the beat | same |
+| `Pulse Amp` | `Hi − Lo` | `Hi − Lo` |
+| `Mean` | `⅓·Hi + ⅔·Lo` (weighted) | — (not used) |
+| `PI` | `Pulse Amp / Mean` | `Pulse Amp / average(native beat means)` |
+
+An artificial beat has no meaningful mean of its own, so the Artificial table has
+no Mean column and its PI is divided by the **average of all the native beat
+means** (shown as the Mean value in the Native table's Average row). Add or remove
+a native beat and every artificial PI updates automatically.
 
 **TCD ↔ ABP synchronisation.** The fiABP/reABP tracing may be offset in time
 from the TCD envelope. To align them: click **1. Pick low point on TCD** and
@@ -386,13 +399,10 @@ and the **ABP epochs** table fills with the ABP metrics for each selected beat.
 for TCD epochs and one for ABP epochs; the export PI tab carries both
 (`TCD_*` and, once synced, `ABP_*` columns).
 
-**Running averages.** Below the tables a small *Averages* panel shows the mean
-of `Hi`, `Lo`, `Mean`, `Pulse Amp`, and `PI` across all selected beats, split
-into a **Native** column and an **Artificial** column. It recalculates on its own
-every time a beat is added or removed, so it always reflects the current set. The
-same per-class averages are written to the Excel PI tab as trailing
+The per-class averages are also written to the Excel PI tab as trailing
 **Native average** / **Artificial average** rows (with `ABP_*` values too once
-synced).
+synced). The ABP epochs table (used by the sync feature above) still reports each
+ABP beat's own mean and PI.
 
 Native beats are drawn in **blue** and artificial in **red** (distinguishable for
 red-green colour-blind reviewers).

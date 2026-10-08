@@ -271,6 +271,10 @@ def api_reopen():
             overview = None
 
     state = new_state
+    # Restore the first tag's CA/CVR windows into working state (placeholders if
+    # no recording) so the shaded windows redraw and a later auto-save does not
+    # wipe them. PI already rides in state.pi_epochs.
+    _rehydrate_cacvr_selections(first.get("selections", {}))
     return jsonify({
         "reopened": True,
         "gui_version": norm.get("gui_version"),
@@ -447,6 +451,11 @@ def api_ca_calculate():
         return guard
     if state.ca_selection is None:
         return jsonify({"error": "No selection. Click Select Start first."}), 400
+    if "abp" not in state.ca_selection or "env" not in state.ca_selection:
+        return jsonify({"error": (
+            "This CA window was restored from saved ranges without sample data. "
+            "Re-select the window on the plot to recalculate."
+        )}), 400
 
     vessel = _current_vessel()
 
@@ -823,6 +832,11 @@ def api_cvr_calculate():
         return jsonify({"error": "Both baseline and hypercapnia TCD selections are required."}), 400
     if state.cvr_co2_baseline is None or state.cvr_co2_hypercap is None:
         return jsonify({"error": "Select a baseline and a hypercapnia CO2 point on the CO2 waveform first."}), 400
+    if "mean" not in state.cvr_baseline or "mean" not in state.cvr_hypercap:
+        return jsonify({"error": (
+            "These CVR windows were restored from saved ranges without sample data. "
+            "Re-select baseline and hypercapnia on the plot to recalculate."
+        )}), 400
 
     vessel = _current_vessel()
 
@@ -959,7 +973,7 @@ def _pi_payload():
     rides on the main-screen tag, so there is no PI-specific speed/vessel; the
     ABP epoch table is derived from the TCD epochs and the sync shift."""
     return {
-        "epochs": pi_analysis.numbered(state.pi_epochs),
+        "epochs": pi_analysis.numbered(pi_analysis.resolve_pi(state.pi_epochs)),
         "abp_epochs": pi_analysis.abp_epochs_for(
             state.pi_epochs, state.time, state.abp, state.pi_abp_shift),
         "summary": pi_analysis.summarize(state.pi_epochs),
@@ -1252,6 +1266,57 @@ def _cacvr_selection_ranges():
     return ranges
 
 
+def _rehydrate_cacvr_selections(saved):
+    """Rebuild the working CA/CVR selection objects from a tag's saved ranges, so
+    the live state faithfully represents the tag that was just loaded.
+
+    This is what stops CA/CVR windows from vanishing. A saved session stores its
+    selections only as time ranges; loading one used to restore the results and
+    PI but leave these selection objects empty. The next auto-save then rebuilt
+    the stored 'selections' from that empty working state and overwrote the saved
+    ranges with None — so switching tags (or finishing a CA after a CVR, and the
+    reverse) silently wiped the windows on disk. PI never hid because it IS
+    restored into state.
+
+    With a recording loaded we slice its waveform so the windows redraw and can
+    be recalculated; without one we keep range-only placeholders so the ranges
+    still round-trip through auto-save. CO2 points are stored whole, so they come
+    back as-is.
+    """
+    saved = saved or {}
+    has_rec = state.has_recording()
+
+    def window(rng, cols):
+        if not rng:
+            return None
+        t0, t1 = rng.get("start"), rng.get("end")
+        if t0 is None or t1 is None:
+            return None
+        t0, t1 = float(t0), float(t1)
+        if has_rec:
+            mask = (state.time >= t0) & (state.time <= t1)
+            if mask.any():
+                sel = {"time": state.time[mask].copy()}
+                for name, arr in cols:
+                    sel[name] = arr[mask].copy()
+                return sel
+        # No recording (or a range outside it): keep the bounds only, so the
+        # shaded window still redraws and the range survives the next auto-save.
+        return {"time": np.array([t0, t1], dtype=float)}
+
+    state.ca_selection = window(saved.get("ca"),
+                                [("env", state.env_u), ("abp", state.abp)])
+    state.cvr_baseline = window(saved.get("cvr_baseline"),
+                                [("mean", state.mean_u), ("env", state.env_u)])
+    state.cvr_hypercap = window(saved.get("cvr_hypercapnia"),
+                                [("mean", state.mean_u), ("env", state.env_u)])
+    state.cvr_co2_baseline = saved.get("cvr_co2_baseline") or None
+    state.cvr_co2_hypercap = saved.get("cvr_co2_hypercapnia") or None
+    # Computed outputs are not re-derived here — they already live in results.
+    state.ca_result = None
+    state.cvr_result = None
+
+
 def _cacvr_result_summary(results):
     """Just the numbers the result boxes show — no big tables."""
     ca = {}
@@ -1401,6 +1466,9 @@ def api_cacvr_load_session():
     state.pi_epochs = data.get("pi_epochs", []) or []
     state.pi_next_id = max((e["id"] for e in state.pi_epochs), default=0) + 1
     state.pi_abp_shift = float(data.get("pi_abp_shift", 0.0) or 0.0)
+    # Restore the CA/CVR selection windows into working state too, so a later
+    # auto-save re-persists them instead of wiping them (see the helper).
+    _rehydrate_cacvr_selections(data.get("selections", {}))
     state.log(
         f"CA/CVR: loaded session {fname} (label {state.cacvr_speed!r}); "
         f"{len(state.pi_epochs)} PI beat(s)."

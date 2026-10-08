@@ -301,18 +301,33 @@
           <div class="card-body">
             <div class="epoch-tables">
               <div class="epoch-col">
-                <div class="epoch-col-title">TCD epochs</div>
+                <div class="epoch-col-title">Native beats</div>
                 <div class="epoch-table-wrap">
-                  <table class="epoch-table" id="piTcdTable">
+                  <table class="epoch-table" id="piNativeTable">
                     <thead>
                       <tr>
-                        <th style="width:24px;"><input type="checkbox" id="piEpochAll" title="Select all"></th>
+                        <th style="width:24px;"><input type="checkbox" id="piNativeAll" title="Select all native"></th>
                         <th>Beat</th><th>Start</th><th>End</th>
                         <th>Hi</th><th>Lo</th><th>Mean</th><th>Pulse Amp</th><th>PI</th>
                       </tr>
                     </thead>
-                    <tbody id="piEpochBody">
-                      <tr class="epoch-empty"><td colspan="9">No beats selected yet.</td></tr>
+                    <tbody id="piNativeBody">
+                      <tr class="epoch-empty"><td colspan="9">No native beats selected yet.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="epoch-col-title" style="margin-top:14px;">Artificial beats</div>
+                <div class="epoch-table-wrap">
+                  <table class="epoch-table" id="piArtTable">
+                    <thead>
+                      <tr>
+                        <th style="width:24px;"><input type="checkbox" id="piArtAll" title="Select all artificial"></th>
+                        <th>Beat</th><th>Start</th><th>End</th>
+                        <th>Hi</th><th>Lo</th><th>Pulse Amp</th><th>PI</th>
+                      </tr>
+                    </thead>
+                    <tbody id="piArtBody">
+                      <tr class="epoch-empty"><td colspan="8">No artificial beats selected yet.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -336,7 +351,7 @@
             </div>
             <div class="epoch-actions">
               <button class="btn btn-danger btn-sm" id="piDeselectBtn" disabled>Remove Checked</button>
-              <span class="epoch-note">PI = Pulse Amp / Mean &nbsp;·&nbsp; Pulse Amp = Hi − Lo &nbsp;·&nbsp; Mean = ⅓·Hi + ⅔·Lo</span>
+              <span class="epoch-note">Pulse Amp = Hi − Lo &nbsp;·&nbsp; Native: Mean = ⅓·Hi + ⅔·Lo, PI = Pulse Amp / Mean &nbsp;·&nbsp; Artificial: PI = Pulse Amp / avg(native Mean)</span>
             </div>
           </div>
         </div>
@@ -399,16 +414,6 @@
             <div class="result-sub" id="piArtificialPI">PI —</div>
           </div>
         </div>
-
-        <!-- running averages over all selected beats (auto-updates) -->
-        <table class="pi-avg-table" id="piAvgPanel">
-          <tr><th>Average</th><th class="avg-native">Native</th><th class="avg-artificial">Artificial</th></tr>
-          <tr><td>Hi</td><td id="avgNatHi">—</td><td id="avgArtHi">—</td></tr>
-          <tr><td>Lo</td><td id="avgNatLo">—</td><td id="avgArtLo">—</td></tr>
-          <tr><td>Mean</td><td id="avgNatMean">—</td><td id="avgArtMean">—</td></tr>
-          <tr><td>Pulse Amp</td><td id="avgNatPa">—</td><td id="avgArtPa">—</td></tr>
-          <tr><td>PI</td><td id="avgNatPi">—</td><td id="avgArtPi">—</td></tr>
-        </table>
 
         <div class="marks-panel" id="piMarksPanel">
           <div class="marks-header">

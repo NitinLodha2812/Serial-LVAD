@@ -229,6 +229,9 @@ def pi_epochs_frame(tcd_epochs: list, abp_epochs: list = None):
     appended as ABP_* columns. Pulse amplitude (Hi-Lo) replaces pulse width."""
     if not tcd_epochs:
         return None
+    # Finalise PI the group's way (artificial PI uses the average native mean,
+    # and the artificial mean is blanked) before laying out rows or averages.
+    tcd_epochs = pi_analysis.resolve_pi(tcd_epochs)
     abp_by_id = {e["id"]: e for e in (abp_epochs or [])}
     rows = []
     for e in pi_analysis.numbered(tcd_epochs):

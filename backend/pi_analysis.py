@@ -142,15 +142,52 @@ def _mean_of(values):
 
 
 def average_metrics(items: list) -> dict:
-    """Running average of each metric over a set of beats (Hi/Lo/Mean/PA/PI)."""
+    """Running average of each metric over a set of beats (Hi/Lo/Mean/PA/PI).
+    `mean` averages to None for artificial beats, which no longer carry one."""
     return {k: _mean_of(e.get(k) for e in items) for k in AVG_KEYS}
+
+
+def native_mean_average(epochs: list):
+    """Average of the native beats' weighted means. This is the denominator the
+    group uses for artificial-beat PI (an artificial beat has no meaningful mean
+    of its own, so it is divided by the average native mean instead)."""
+    means = [e.get("mean") for e in epochs
+             if e.get("type") == NATIVE and e.get("mean") is not None]
+    return round(float(np.mean(means)), 4) if means else None
+
+
+def resolve_pi(epochs: list) -> list:
+    """Return a copy of `epochs` with PI finalised the way the group computes it:
+
+        native PI      = Pulse Amp / its own weighted mean
+        artificial PI  = Pulse Amp / average(all native beat means)
+
+    An artificial beat's own mean is not used, so it is blanked here. The input
+    list is not mutated — call this wherever epochs are shown or exported, so a
+    change to the native set reflows every artificial PI automatically.
+    """
+    denom = native_mean_average(epochs)
+    out = []
+    for e in epochs:
+        e2 = dict(e)
+        pa = e2.get("pulse_amp")
+        if e2.get("type") == ARTIFICIAL:
+            e2["mean"] = None
+            e2["pi"] = _safe_float(pa / denom) if (pa is not None and denom) else None
+        else:
+            mu = e2.get("mean")
+            e2["pi"] = _safe_float(pa / mu) if (pa is not None and mu) else None
+        out.append(e2)
+    return out
 
 
 def summarize(epochs: list) -> dict:
     """Counts, mean PI, and the full per-class metric averages (Hi, Lo, Mean,
-    Pulse Amp, PI) that the running-average panel and the export both use."""
-    nat = [e for e in epochs if e["type"] == NATIVE]
-    art = [e for e in epochs if e["type"] == ARTIFICIAL]
+    Pulse Amp, PI) shown as the per-table average rows and used by the export.
+    PI is resolved first, so artificial PI reflects the native-mean denominator."""
+    resolved = resolve_pi(epochs)
+    nat = [e for e in resolved if e["type"] == NATIVE]
+    art = [e for e in resolved if e["type"] == ARTIFICIAL]
     return {
         "n_native": len(nat),
         "n_artificial": len(art),
@@ -158,6 +195,7 @@ def summarize(epochs: list) -> dict:
         "mean_pi_artificial": _mean_of(e["pi"] for e in art),
         "avg_native": average_metrics(nat),
         "avg_artificial": average_metrics(art),
+        "native_mean_avg": native_mean_average(epochs),
     }
 
 
