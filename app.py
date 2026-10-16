@@ -972,10 +972,14 @@ def _pi_payload():
     """Everything the PI tab needs to redraw itself after any mutation. PI now
     rides on the main-screen tag, so there is no PI-specific speed/vessel; the
     ABP epoch table is derived from the TCD epochs and the sync shift."""
+    abp_epochs = pi_analysis.abp_epochs_for(
+        state.pi_epochs, state.time, state.abp, state.pi_abp_shift)
     return {
         "epochs": pi_analysis.numbered(pi_analysis.resolve_pi(state.pi_epochs)),
-        "abp_epochs": pi_analysis.abp_epochs_for(
-            state.pi_epochs, state.time, state.abp, state.pi_abp_shift),
+        # Resolve ABP PI the same way as TCD (artificial PI uses the average of
+        # the ABP native means; artificial mean blanked) so the four PI tables
+        # read consistently.
+        "abp_epochs": pi_analysis.numbered(pi_analysis.resolve_pi(abp_epochs)),
         "summary": pi_analysis.summarize(state.pi_epochs),
         "abp_shift": round(state.pi_abp_shift, 4),
         "tag": state.cacvr_speed,
@@ -1437,6 +1441,52 @@ def api_cacvr_next_speed():
     existing = os.path.isfile(os.path.join(CACVR_SESSION_DIR, fname))
     state.log(f"CA/CVR: ready for session/speed {label!r}. Existing results: {existing}")
     return jsonify({**_cacvr_payload(), "existing_session": fname if existing else None})
+
+
+@app.route("/api/cacvr/delete_tag", methods=["POST"])
+def api_cacvr_delete_tag():
+    """
+    Delete an entire tag (vessel/speed) — its CA, CVR, and PI together — so the
+    operator can redo a session from scratch without unselecting everything by
+    hand. Removes the saved session file and, if it is the tag currently loaded
+    in the working set, clears that too.
+    """
+    if state is None:
+        return jsonify({"error": "No data loaded"}), 400
+    body = request.get_json() or {}
+    label = str(body.get("label", state.cacvr_speed or "")).strip()
+    if not label:
+        return jsonify({"error": "A tag (vessel/speed) is required to delete."}), 400
+
+    try:
+        deleted = cacvr_sessions.delete_session(CACVR_SESSION_DIR, state.base_name, label)
+    except OSError as e:
+        return jsonify({"error": f"Could not delete tag: {e}"}), 400
+
+    cleared_working = False
+    if (state.cacvr_speed or "").strip() == label:
+        # The tag being deleted is the one loaded — clear CA/CVR/PI working state
+        # so the tabs reset, matching the removal on disk.
+        state.results = {"CA": {"MCA": None, "PCA": None}, "CVR": {"MCA": None, "PCA": None}}
+        state.ca_selection = state.ca_result = None
+        state.cvr_baseline = state.cvr_hypercap = None
+        state.cvr_co2_baseline = state.cvr_co2_hypercap = state.cvr_result = None
+        state.pi_epochs = []
+        state.pi_next_id = 1
+        cleared_working = True
+
+    state.log(
+        f"CA/CVR: deleted tag {label!r} (CA/CVR/PI)."
+        + (" Working set cleared." if cleared_working else "")
+        + ("" if deleted else " (no saved file existed.)")
+    )
+    remaining = cacvr_sessions.list_sessions(CACVR_SESSION_DIR, state.base_name)
+    return jsonify({
+        "deleted": deleted, "label": label, "cleared_working": cleared_working,
+        "sessions": remaining,
+        **({"pi": _pi_payload()} if cleared_working else {}),
+        **({"cacvr": _cacvr_payload()} if cleared_working else {}),
+    })
 
 
 @app.route("/api/cacvr/load_session", methods=["POST"])

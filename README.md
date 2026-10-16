@@ -334,6 +334,11 @@ not just the result numbers, so switching between tags (or finishing a CA after 
 CVR, and the reverse) keeps every tag's shaded windows intact instead of silently
 dropping them on the next auto-save.
 
+**Delete Tag…** on the Main screen removes an entire tag — its CA, CVR, and PI
+together — so you can redo a vessel/speed from scratch without unselecting
+everything by hand. If the deleted tag is the one currently loaded, the three tabs
+reset too. It asks for confirmation and cannot be undone.
+
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*
 is echoed visually onto the same signal's plot on the other tabs.
@@ -372,8 +377,10 @@ is saved, loaded, and exported with CA and CVR.
    **Remove Checked** to delete specific ones (each table has its own select-all);
    **Clear All Selections** empties the tag's beats.
 
-Selected beats are split into a **Native beats** table and an **Artificial beats**
-table, and each table ends with an **Average** row holding the mean of its columns.
+Selected beats are shown in **four tables** — TCD Native, TCD Artificial, ABP
+Native, ABP Artificial — split by signal (TCD vs ABP) and by beat type (native vs
+artificial). Each table ends with an **Average** row holding the mean of its
+columns. The ABP tables fill once TCD→ABP sync is set.
 
 Per beat the tables report:
 

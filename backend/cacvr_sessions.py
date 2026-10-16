@@ -59,6 +59,16 @@ def load_session(session_dir: str, filename: str) -> dict:
         return json.load(f)
 
 
+def delete_session(session_dir: str, base_name: str, label: str) -> bool:
+    """Remove a tag's saved CA/CVR/PI session file. Returns True if a file was
+    deleted. Used by the main-screen 'delete this tag' action."""
+    path = os.path.join(session_dir, session_filename(base_name, label))
+    if os.path.isfile(path):
+        os.remove(path)
+        return True
+    return False
+
+
 def list_sessions(session_dir: str, base_name: str) -> list:
     """Every saved CA/CVR label for this recording, with a compact summary."""
     if not os.path.isdir(session_dir):

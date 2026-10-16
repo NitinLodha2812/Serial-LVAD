@@ -77,7 +77,7 @@ function enableCVR(yes) {
 
 // The consolidated Main-screen session/save/export controls.
 function enableMainSave(yes) {
-  ['cacvrLabelInput', 'cacvrLoadBtn', 'cacvrNextBtn',
+  ['cacvrLabelInput', 'cacvrLoadBtn', 'cacvrNextBtn', 'cacvrDeleteBtn',
    'saveProgressBtn', 'exportAllBtn'].forEach(id => {
     $(id).disabled = !yes;
   });
@@ -1018,77 +1018,82 @@ function renderPI(payload) {
                                          : '(sync ABP to see values)';
 
   $('piUndoBtn').disabled = piEpochs.length === 0;
-  renderPIBeatTables(s);
-  renderPIAbpTable();
+  renderPIBeatTables();
+  renderPIAbpTables();
 }
 
 const PI_LABEL = (e) => (e.type === 'native' ? 'Native #' : 'Artificial #') + e.ordinal;
 
-// One beat table (native or artificial), with a trailing averages row. The
-// artificial table omits the Mean column — an artificial beat has no mean of its
-// own; its PI uses the average of the native means instead.
-function renderPIBeatTable(kind, bodyId, allId, emptyCols, avg) {
-  const body = $(bodyId);
-  body.innerHTML = '';
-  const hasMean = kind === 'native';
-  const rows = piEpochs.filter(e => e.type === kind);
-  if (!rows.length) {
-    body.innerHTML = `<tr class="epoch-empty"><td colspan="${emptyCols}">No ${kind} beats selected yet.</td></tr>`;
-    $(allId).checked = false;
-    return;
-  }
-  for (const e of rows) {
-    const tr = document.createElement('tr');
-    tr.className = kind === 'native' ? 'row-native' : 'row-artificial';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.dataset.id = e.id;
-    cb.addEventListener('change', updatePIDeselectState);
-    const cells = hasMean
-      ? [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)]
-      : [null, PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.pulse_amp), fmt(e.pi, 3)];
-    cells.forEach((text, i) => {
-      const td = document.createElement('td');
-      if (i === 0) td.appendChild(cb); else td.textContent = text;
-      tr.appendChild(td);
-    });
-    body.appendChild(tr);
-  }
-  // Averages row at the bottom (average of the 5 variables for this class).
-  const a = avg || {};
-  const avgCells = hasMean
-    ? ['', 'Average', '', '', fmt(a.max), fmt(a.min), fmt(a.mean), fmt(a.pulse_amp), fmt(a.pi, 3)]
-    : ['', 'Average', '', '', fmt(a.max), fmt(a.min), fmt(a.pulse_amp), fmt(a.pi, 3)];
-  const tr = document.createElement('tr');
-  tr.className = 'epoch-avg';
-  avgCells.forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); });
-  body.appendChild(tr);
-  $(allId).checked = false;
+// Average of each metric over a set of beats, computed client-side so every
+// table (TCD or ABP) gets its own averages row. Artificial tables carry no mean.
+function avgOfRows(rows, hasMean) {
+  const m = k => {
+    const vs = rows.map(e => e[k]).filter(v => v != null && Number.isFinite(v));
+    return vs.length ? vs.reduce((s, v) => s + v, 0) / vs.length : null;
+  };
+  return { max: m('max'), min: m('min'), mean: hasMean ? m('mean') : null,
+           pulse_amp: m('pulse_amp'), pi: m('pi') };
 }
 
-function renderPIBeatTables(summary) {
-  renderPIBeatTable('native', 'piNativeBody', 'piNativeAll', 9, summary.avg_native);
-  renderPIBeatTable('artificial', 'piArtBody', 'piArtAll', 8, summary.avg_artificial);
+// Render one beat table with a trailing averages row. Artificial tables omit the
+// Mean column (an artificial beat has no mean of its own; its PI uses the average
+// of the native means). TCD tables carry a checkbox for Remove Checked; the ABP
+// tables are derived, so they have no checkbox.
+function renderBeatTable(rows, opts) {
+  const body = $(opts.bodyId);
+  body.innerHTML = '';
+  if (!rows.length) {
+    body.innerHTML = `<tr class="epoch-empty"><td colspan="${opts.emptyCols}">${opts.emptyText}</td></tr>`;
+    if (opts.allId) $(opts.allId).checked = false;
+    return;
+  }
+  const cellsFor = (e) => opts.hasMean
+    ? [PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)]
+    : [PI_LABEL(e), fmt(e.t_start), fmt(e.t_end), fmt(e.max), fmt(e.min), fmt(e.pulse_amp), fmt(e.pi, 3)];
+  for (const e of rows) {
+    const tr = document.createElement('tr');
+    tr.className = opts.rowClass;
+    if (opts.hasCheckbox) {
+      const td = document.createElement('td');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.dataset.id = e.id;
+      cb.addEventListener('change', updatePIDeselectState);
+      td.appendChild(cb); tr.appendChild(td);
+    }
+    cellsFor(e).forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); });
+    body.appendChild(tr);
+  }
+  // Averages row at the bottom (average of this table's variables).
+  const a = avgOfRows(rows, opts.hasMean);
+  const avgCells = opts.hasMean
+    ? ['Average', '', '', fmt(a.max), fmt(a.min), fmt(a.mean), fmt(a.pulse_amp), fmt(a.pi, 3)]
+    : ['Average', '', '', fmt(a.max), fmt(a.min), fmt(a.pulse_amp), fmt(a.pi, 3)];
+  const tr = document.createElement('tr');
+  tr.className = 'epoch-avg';
+  if (opts.hasCheckbox) tr.appendChild(document.createElement('td'));
+  avgCells.forEach(text => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); });
+  body.appendChild(tr);
+  if (opts.allId) $(opts.allId).checked = false;
+}
+
+function renderPIBeatTables() {
+  renderBeatTable(piEpochs.filter(e => e.type === 'native'),
+    { bodyId: 'piNativeBody', allId: 'piNativeAll', hasMean: true, hasCheckbox: true,
+      emptyCols: 9, emptyText: 'No native beats selected yet.', rowClass: 'row-native' });
+  renderBeatTable(piEpochs.filter(e => e.type === 'artificial'),
+    { bodyId: 'piArtBody', allId: 'piArtAll', hasMean: false, hasCheckbox: true,
+      emptyCols: 8, emptyText: 'No artificial beats selected yet.', rowClass: 'row-artificial' });
   updatePIDeselectState();
 }
 
-function renderPIAbpTable() {
-  const body = $('piAbpBody');
-  body.innerHTML = '';
+function renderPIAbpTables() {
   const withVals = piAbpEpochs.filter(e => e.max != null);
-  if (!withVals.length) {
-    body.innerHTML = '<tr class="epoch-empty"><td colspan="8">No ABP epochs.</td></tr>';
-    return;
-  }
-  for (const e of piAbpEpochs) {
-    const tr = document.createElement('tr');
-    tr.className = e.type === 'native' ? 'row-native' : 'row-artificial';
-    const cells = [PI_LABEL(e), fmt(e.t_start), fmt(e.t_end),
-                   fmt(e.max), fmt(e.min), fmt(e.mean), fmt(e.pulse_amp), fmt(e.pi, 3)];
-    cells.forEach(text => {
-      const td = document.createElement('td'); td.textContent = text; tr.appendChild(td);
-    });
-    body.appendChild(tr);
-  }
+  renderBeatTable(withVals.filter(e => e.type === 'native'),
+    { bodyId: 'piAbpNativeBody', hasMean: true, hasCheckbox: false,
+      emptyCols: 8, emptyText: 'No ABP native epochs.', rowClass: 'row-native' });
+  renderBeatTable(withVals.filter(e => e.type === 'artificial'),
+    { bodyId: 'piAbpArtBody', hasMean: false, hasCheckbox: false,
+      emptyCols: 7, emptyText: 'No ABP artificial epochs.', rowClass: 'row-artificial' });
 }
 
 function checkedEpochIds() {
@@ -1479,6 +1484,39 @@ $('cacvrNextBtn').addEventListener('click', async () => {
   } catch (err) {
     toast(err.message, 'error');
     appendLog(`CA/CVR next-${word.toLowerCase()} error: ` + err.message);
+  }
+  hideLoading();
+});
+
+$('cacvrDeleteBtn').addEventListener('click', async () => {
+  const word = tagWord();
+  const label = $('cacvrLabelInput').value.trim();
+  if (!label) { toast(`Enter or load a ${word.toLowerCase()} to delete`, 'info'); return; }
+  if (!confirm(`Delete ${word} "${label}" entirely?\nThis removes its CA, CVR, and PI results. This cannot be undone.`)) {
+    appendLog(`CA/CVR: delete ${word.toLowerCase()} "${label}" cancelled.`);
+    return;
+  }
+  showLoading();
+  try {
+    const r = await api('/api/cacvr/delete_tag', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    if (r.cleared_working) {
+      // The deleted tag was the one loaded — reset all three tabs.
+      $('caResultBox').classList.add('hidden');
+      $('cvrResultBox').classList.add('hidden');
+      caCharts.clearSelection();
+      applyCvrSelections({});
+      if (r.pi) renderPI(r.pi);
+    }
+    const msg = r.deleted ? `Deleted ${word.toLowerCase()} "${label}" (CA, CVR, PI).`
+                          : `No saved results for ${word.toLowerCase()} "${label}" — working set cleared.`;
+    appendLog('CA/CVR: ' + msg);
+    toast(r.deleted ? `Deleted ${word.toLowerCase()} ${label}` : 'Nothing saved to delete', r.deleted ? 'success' : 'info');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog(`CA/CVR delete-${word.toLowerCase()} error: ` + err.message);
   }
   hideLoading();
 });
