@@ -336,6 +336,12 @@ not just the result numbers, so switching between tags (or finishing a CA after 
 CVR, and the reverse) keeps every tag's shaded windows intact instead of silently
 dropping them on the next auto-save.
 
+**Data edits persist.** NaN-brush deletions are saved in the progress JSON and
+**re-applied on reopen**, so removed segments stay removed instead of reappearing
+when the recording is loaded again (recommended order: load the recording, then
+Load Progress). The cleaned `*_Master.txt` is an alternative way to reload the
+edited data directly.
+
 **Delete Tag…** on the Main screen removes an entire tag — its CA, CVR, and PI
 together — so you can redo a vessel/speed from scratch without unselecting
 everything by hand. If the deleted tag is the one currently loaded, the three tabs

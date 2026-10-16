@@ -47,6 +47,8 @@ def build_progress_payload(state: SessionState, sessions: list) -> dict:
         "session": state.session,
         "base_name": state.base_name,
         "raw_path": state.raw_path,
+        # Data edits (NaN deletions) so they persist and re-apply on reopen.
+        "edits": _serialise_dict(getattr(state, "edit_log", []) or []),
         "cacvr_sessions": [
             {
                 "label": s.get("label") or "",
@@ -132,6 +134,9 @@ def parse_progress_payload(data: dict) -> dict:
             sessions.append({"label": session, "results": res, "selections": {},
                              "pi_epochs": [], "pi_abp_shift": 0.0})
 
+    edits = data.get("edits")
+    if not isinstance(edits, list):
+        edits = []
     return {
         "gui_version": data.get("gui_version"),
         "study_mode": study_mode,
@@ -139,6 +144,7 @@ def parse_progress_payload(data: dict) -> dict:
         "session": session,
         "base_name": base_name,
         "sessions": sessions,
+        "edits": edits,
     }
 
 

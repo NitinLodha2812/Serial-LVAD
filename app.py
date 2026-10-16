@@ -253,9 +253,16 @@ def api_reopen():
     # the empty data arrays. The intended order is still "load recording, then
     # load progress"; loading progress first and the recording afterwards also
     # works, just with one extra "Load <tag>" to review restored results.
+    # Carry the saved data edits so they re-apply to the recording and persist
+    # on the next export, instead of removed data reappearing on reopen.
+    new_state.edit_log = norm.get("edits", []) or []
+
     overview = None
     if state is not None and state.has_recording():
         new_state.adopt_recording_from(state)
+        reapplied = new_state.reapply_edits()
+        if reapplied:
+            new_state.log(f"Re-applied {reapplied} removed sample(s) from the saved edits.")
         if state.base_name and new_state.base_name and state.base_name != new_state.base_name:
             new_state.log(
                 f"Note: the loaded recording ({state.base_name!r}) and the progress "
@@ -929,29 +936,19 @@ def api_edit_nan():
     if not isinstance(ranges, list) or not ranges:
         return jsonify({"error": "No ranges provided"}), 400
 
-    arr = getattr(state, EDITABLE_SIGNALS[signal])
+    attr = EDITABLE_SIGNALS[signal]
+    arr = getattr(state, attr)
     if arr is None or len(arr) == 0:
         return jsonify({"error": f"Signal '{signal}' is empty"}), 400
-
-    total_changed = 0
     for r in ranges:
-        try:
-            x_min = float(r["x_min"]); x_max = float(r["x_max"])
-            y_min = float(r["y_min"]); y_max = float(r["y_max"])
-        except (KeyError, TypeError, ValueError):
+        if not all(k in r for k in ("x_min", "x_max", "y_min", "y_max")):
             return jsonify({"error": "Each range needs numeric x_min, x_max, y_min, y_max"}), 400
-        if x_max < x_min: x_min, x_max = x_max, x_min
-        if y_max < y_min: y_min, y_max = y_max, y_min
 
-        mask = (
-            (state.time >= x_min) & (state.time <= x_max) &
-            (arr     >= y_min) & (arr     <= y_max) &
-            ~np.isnan(arr)
-        )
-        n = int(mask.sum())
-        if n > 0:
-            arr[mask] = np.nan
-            total_changed += n
+    total_changed = state.apply_nan_ranges(attr, ranges)
+    # Record the edit so it persists in the progress JSON and is re-applied on
+    # reopen, instead of the removed data reappearing when the recording reloads.
+    if total_changed > 0:
+        state.edit_log.append({"signal": attr, "ranges": ranges})
 
     state.log(
         f"Edit: replaced {total_changed} sample(s) in {signal} with NaN "

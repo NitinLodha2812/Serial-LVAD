@@ -274,6 +274,12 @@ class SessionState:
             "CVR": {"MCA": None, "PCA": None},
         }
 
+        # Data edits (NaN-brush deletions), as [{signal, ranges:[{x_min,...}]}].
+        # Recorded so they persist in the progress JSON and are re-applied on
+        # reopen, instead of the removed data reappearing when the recording is
+        # loaded fresh.
+        self.edit_log: list = []
+
         # log
         self.log_lines: list = []
 
@@ -482,6 +488,34 @@ class SessionState:
         if isinstance(self.column_positions, dict):
             self.column_positions["abp"] = index
         return self.raw_headers[index]
+
+    def apply_nan_ranges(self, signal: str, ranges: list) -> int:
+        """NaN out every sample of `signal` that falls inside any of the given
+        (time, value) rectangles. Returns how many samples were changed. Shared
+        by the edit endpoint and by reopen (which re-applies the saved edits)."""
+        arr = getattr(self, signal, None)
+        if arr is None or len(arr) == 0:
+            return 0
+        total = 0
+        for r in ranges or []:
+            try:
+                x0, x1 = sorted((float(r["x_min"]), float(r["x_max"])))
+                y0, y1 = sorted((float(r["y_min"]), float(r["y_max"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+            mask = ((self.time >= x0) & (self.time <= x1)
+                    & (arr >= y0) & (arr <= y1) & ~np.isnan(arr))
+            n = int(mask.sum())
+            if n > 0:
+                arr[mask] = np.nan
+                total += n
+        return total
+
+    def reapply_edits(self) -> int:
+        """Re-apply every recorded edit to the current signals (used after a raw
+        recording is paired with a restored edit_log on reopen)."""
+        return sum(self.apply_nan_ranges(e.get("signal"), e.get("ranges", []))
+                   for e in (self.edit_log or []))
 
     def abp_source_options(self) -> list:
         """The three ABP sources the manual dropdown always offers — fiABP,
