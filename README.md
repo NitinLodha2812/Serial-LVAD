@@ -296,7 +296,10 @@ controls live in one place on the **Main screen** (not on the CA/CVR tabs):
    - **RAMPs** — **one workbook per speed**, each with up to **3 tabs**: `CA`,
      `CVR`, `PI`.
    - plus one **`*_Master.xlsx`** (raw data + edits, written **once**; skipped
-     after a JSON reopen with no raw data) and one **`*_progress.json`**.
+     after a JSON reopen with no raw data), a **`*_Master.txt`** — the same
+     cleaned data as a comma-delimited text file in the original recording's
+     format, so the edited data can be reloaded without re-deleting the same
+     segments — and one **`*_progress.json`**.
 
 **PI is part of this export** alongside CA and CVR (the standalone PI Demographics
 workbook has been removed). Each PI tab lists **one row per beat** — `Beat`,
@@ -355,10 +358,15 @@ Beyond scroll-to-zoom (X) and **Shift+drag** to pan, each tab has a control row:
 **ABP source** — the ABP plot (CA tab) and the fiABP/reABP plot (PI tab) fill
 automatically from the best available column (fiABP → A-LINE → reABP by data
 coverage). To override it, use the small **dropdown built into the plot title**
-(no extra button): pick `fiABP`, `A-LINE`, or `reABP`. Both ABP plots stay in
-sync; re-run **Calculate MX** to recompute with the chosen source.
+(no extra button). The dropdown **always lists all three sources** (`fiABP`,
+`A-LINE`, `reABP`), even when a recording has no column or no data for one; a
+source with no data is marked "— no data" and selecting it leaves the plot empty
+and prompts you to pick another. Automatic selection is unchanged. Both ABP plots
+stay in sync; re-run **Calculate MX** to recompute with the chosen source.
 
-On the PI tab both plots stay X-synced as you zoom or pan.
+On the PI tab both plots stay X-synced as you zoom or pan, and removed (NaN)
+samples show as a **break in the line** rather than being bridged over, matching
+how the CA/CVR plots display deletions.
 
 ### PI (Epochs) tab
 

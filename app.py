@@ -1198,18 +1198,40 @@ def api_pi_clear():
 @app.route("/api/abp/source", methods=["POST"])
 def api_abp_source():
     """
-    Switch which raw column fills the ABP signal. `index` must be one of the
-    candidates the loader found. Returns the decimated ABP for replotting; the
-    CA MX and the Master export pick up the new column on their next run.
+    Switch which source fills the ABP signal. Preferred form is `source` — one of
+    the canonical names the dropdown always lists (fiABP / A-LINE / reABP); a
+    source with no column or no data in this recording blanks the ABP plot and
+    reports has_data=False. Legacy `index` (a specific raw column) still works.
+    Returns the decimated ABP for replotting; the CA MX and Master export pick up
+    the new source on their next run.
     """
     if state is None:
         return jsonify({"error": "No data loaded"}), 400
     body = request.get_json() or {}
+
+    if "source" in body:
+        name = str(body["source"]).strip()
+        try:
+            res = state.set_abp_source_by_name(name)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if res["has_data"]:
+            state.log(f"ABP source switched to {res['header']}.")
+        else:
+            state.log(f"ABP source {name}: no data in this recording — plot is empty.")
+        return jsonify({
+            "abp_source": res["header"],
+            "abp_source_index": res["index"],
+            "has_data": res["has_data"],
+            "abp": state._to_list(state.abp, 50),
+        })
+
+    # Legacy index-based selection.
     try:
         index = int(body["index"])
     except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "index (integer) is required"}), 400
-    if not any(c["index"] == index for c in state.abp_candidates):
+        return jsonify({"error": "source (name) or index (integer) is required"}), 400
+    if not (0 <= index < len(state.raw_headers)):
         return jsonify({"error": "That column is not an available ABP source."}), 400
 
     header = state.set_abp_source(index)
@@ -1217,7 +1239,7 @@ def api_abp_source():
     return jsonify({
         "abp_source": header,
         "abp_source_index": index,
-        # decimated to match the overview plots (same 50x as get_overview_json)
+        "has_data": True,
         "abp": state._to_list(state.abp, 50),
     })
 

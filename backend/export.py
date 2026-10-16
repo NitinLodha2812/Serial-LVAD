@@ -343,6 +343,14 @@ def save_master_excel(state: SessionState, path: str):
         _write_marks_sheet(writer, state)
 
 
+def save_master_text(state: SessionState, path: str):
+    """The cleaned Master as a comma-delimited text file in the same shape as the
+    original raw recording (same columns and header), with the NaN-brushed edits
+    applied. Lets the operator reload the cleaned data later without having to
+    delete the same segments again. Removed samples are written as empty fields."""
+    _master_dataframe(state).to_csv(path, index=False, na_rep="")
+
+
 def save_session_excel(results: dict, path: str) -> int:
     """One session's CA + CVR sheets. Returns the sheet count (0 = nothing)."""
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -379,6 +387,11 @@ def export_all_cacvr(state: SessionState, cacvr_sessions: list, out_dir: str):
             master_name = f"{base}_Master.xlsx"
             save_master_excel(state, os.path.join(workdir, master_name))
             manifest.append(master_name)
+            # Also the cleaned Master as comma-delimited text, so the edited data
+            # can be reloaded without re-deleting the same segments each time.
+            master_txt = f"{base}_Master.txt"
+            save_master_text(state, os.path.join(workdir, master_txt))
+            manifest.append(master_txt)
 
         used = set()
 

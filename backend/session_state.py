@@ -49,6 +49,15 @@ COLUMN_ALIASES = {
     "mark":   ["mark"],                       # marks/event column
 }
 
+# The ABP sources the manual dropdown always lists (display name, header match),
+# whether or not the recording has that column or any data in it. Auto-selection
+# still uses COLUMN_ALIASES["abp"] above; this is only for the manual picker.
+CANONICAL_ABP_SOURCES = [
+    ("fiABP", "fiabp"),
+    ("A-LINE", "aline"),
+    ("reABP", "reabp"),
+]
+
 # Substrings that disqualify a column from matching a given signal.
 # The raw CO2 waveform column is named like "CO2(mmHg)", which would also
 # match a bare "co2" pattern against "ETCO2(mmHg)". Excluding "etco2" here
@@ -474,6 +483,52 @@ class SessionState:
             self.column_positions["abp"] = index
         return self.raw_headers[index]
 
+    def abp_source_options(self) -> list:
+        """The three ABP sources the manual dropdown always offers — fiABP,
+        A-LINE, reABP — each resolved to the column it maps to in THIS recording
+        (or None if that column is absent) and whether it carries any data.
+
+        Automatic source selection is unchanged (it still resolves to the first
+        data-bearing column at load); this only populates the manual picker so a
+        source can be inspected even when it has no column or no data.
+        """
+        import pandas as pd
+        norm = [_normalize_header(h) for h in self.raw_headers]
+        opts = []
+        for name, pat in CANONICAL_ABP_SOURCES:
+            idx = next((i for i, nh in enumerate(norm) if pat in nh), None)
+            cov = 0.0
+            if idx is not None:
+                arr = pd.to_numeric(
+                    pd.Series([r[idx] if idx < len(r) else None for r in self.raw_rows]),
+                    errors="coerce").to_numpy(dtype=np.float64)
+                cov = _column_coverage(arr)
+            opts.append({
+                "name": name,
+                "index": idx,
+                "header": self.raw_headers[idx] if idx is not None else name,
+                "has_data": idx is not None and cov > 0.0,
+                "coverage": round(cov, 3),
+            })
+        return opts
+
+    def set_abp_source_by_name(self, name: str) -> dict:
+        """Switch the ABP source by its canonical name (fiABP/A-LINE/reABP). If
+        the named source has no column or no data, the ABP signal is blanked
+        (all-NaN) so the plot shows empty and the caller can tell the user there
+        is nothing to display. Returns {header, has_data, index}."""
+        opt = next((o for o in self.abp_source_options() if o["name"] == name), None)
+        if opt is None:
+            raise ValueError(f"Unknown ABP source {name!r}")
+        if opt["index"] is None or not opt["has_data"]:
+            self.abp = np.full(len(self.time), np.nan)
+            self.abp_source_index = opt["index"]
+            # Leave column_positions['abp'] untouched: there is no valid column
+            # to write back to for an empty source.
+            return {"header": opt["name"], "has_data": False, "index": opt["index"]}
+        header = self.set_abp_source(opt["index"])
+        return {"header": header, "has_data": True, "index": opt["index"]}
+
     # ----- helpers to serialise numpy for JSON -----
     @staticmethod
     def _to_list(arr, decimate=1):
@@ -511,7 +566,7 @@ class SessionState:
             "abp_source": (self.raw_headers[self.column_positions["abp"]]
                            if self.column_positions.get("abp") is not None
                            else None),
-            "abp_sources": list(self.abp_candidates),
+            "abp_sources": self.abp_source_options(),
             "abp_source_index": self.abp_source_index,
         }
 

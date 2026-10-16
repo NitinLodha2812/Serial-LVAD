@@ -40,6 +40,20 @@ function xyData(timeArr, valArr) {
   return pts;
 }
 
+/* Like xyData, but keeps a point for every sample and sets y=null where the
+   value is missing (removed/NaN). With spanGaps:false this breaks the line at
+   the gap instead of interpolating across it, matching how the other plots show
+   removed data. `shift` offsets x (used by the PI ABP trace after TCD->ABP sync). */
+function xyDataGapped(timeArr, valArr, shift = 0) {
+  const pts = [];
+  for (let i = 0; i < timeArr.length; i++) {
+    if (timeArr[i] == null) continue;
+    const v = valArr[i];
+    pts.push({ x: timeArr[i] + shift, y: (v == null ? null : v) });
+  }
+  return pts;
+}
+
 /* ══════════════════ BRUSH PLUGIN (rectangle draw) ══════════════════ */
 /* Draws the in-progress brush rectangle stored on `chart.$brush`. One
    instance registered globally; it ignores charts that aren't brushing. */
@@ -881,7 +895,7 @@ class PIChart {
     envOpts.plugins.zoom.pan.onPanComplete = () => this._afterView(this.chart);
     this.chart = new Chart(document.getElementById('piPlot'), {
       type: 'line',
-      data: { datasets: [{ label: '_trace', data: xyData(data.time, data.env_u), borderColor: COLORS.envU }] },
+      data: { datasets: [{ label: '_trace', data: xyDataGapped(data.time, data.env_u), borderColor: COLORS.envU, spanGaps: false }] },
       options: envOpts,
     });
     attachBrush(this.chart, 'env_u', (s) => this.onBrushChange(s), { allowPan: true });
@@ -894,7 +908,7 @@ class PIChart {
       abpOpts.plugins.zoom.pan.onPanComplete = () => this._afterView(this.abpChart);
       this.abpChart = new Chart(abpEl, {
         type: 'line',
-        data: { datasets: [{ label: '_trace', data: xyData(data.time, data.abp || []), borderColor: COLORS.abp }] },
+        data: { datasets: [{ label: '_trace', data: xyDataGapped(data.time, data.abp || []), borderColor: COLORS.abp, spanGaps: false }] },
         options: abpOpts,
       });
       // Tag with the 'abp' signal (inactive brush) so a deletion made on the
@@ -930,19 +944,16 @@ class PIChart {
      TCD beats. */
   setTrace(time, env, abp) {
     this._lastTrace = { time, abp: abp || [] };
-    if (this.chart) { this.chart.data.datasets[0].data = xyData(time, env); this.chart.update('none'); }
+    // Keep removed samples as gaps (y=null) instead of bridging over them, so
+    // the TCD and ABP traces show deletions the same way the CA/CVR plots do.
+    if (this.chart) { this.chart.data.datasets[0].data = xyDataGapped(time, env); this.chart.update('none'); }
     this._drawAbpTrace();
   }
 
   _drawAbpTrace() {
     if (!this.abpChart || !this._lastTrace) return;
     const { time, abp } = this._lastTrace;
-    const sh = this.abpShift || 0;
-    const pts = [];
-    for (let i = 0; i < time.length; i++) {
-      if (time[i] != null && abp[i] != null) pts.push({ x: time[i] + sh, y: abp[i] });
-    }
-    this.abpChart.data.datasets[0].data = pts;
+    this.abpChart.data.datasets[0].data = xyDataGapped(time, abp, this.abpShift || 0);
     this.abpChart.update('none');
   }
 

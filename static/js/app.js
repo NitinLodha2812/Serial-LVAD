@@ -336,9 +336,14 @@ $('patientId').addEventListener('change', async () => {
 
 const ABP_SELECT_IDS = ['caAbpSource', 'piAbpSource'];
 
+// The dropdown always lists all three canonical sources (fiABP, A-LINE, reABP)
+// by name, even when a source has no column or no data in this recording. The
+// option for a no-data source is marked so the operator can still inspect it.
 function initAbpSource(data) {
   const sources = data.abp_sources || [];
-  const cur = data.abp_source_index;
+  const curIdx = data.abp_source_index;
+  // Which canonical name is currently active (matched by column index)?
+  const curName = (sources.find(s => s.index != null && s.index === curIdx) || sources[0] || {}).name || '';
   ABP_SELECT_IDS.forEach(id => {
     const sel = $(id);
     sel.innerHTML = '';
@@ -350,30 +355,35 @@ function initAbpSource(data) {
     }
     sources.forEach(s => {
       const o = document.createElement('option');
-      o.value = String(s.index);
-      o.textContent = s.header;
+      o.value = s.name;
+      o.textContent = s.has_data ? s.name : `${s.name} — no data`;
       sel.appendChild(o);
     });
-    if (cur != null) sel.value = String(cur);
+    if (curName) sel.value = curName;
     sel.disabled = false;
-    sel.onchange = () => switchAbpSource(parseInt(sel.value, 10));
+    sel.onchange = () => switchAbpSource(sel.value);
   });
 }
 
-async function switchAbpSource(index) {
-  if (!Number.isFinite(index)) return;
+async function switchAbpSource(source) {
+  if (!source) return;
   showLoading();
   try {
     const r = await api('/api/abp/source', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index }),
+      body: JSON.stringify({ source }),
     });
-    caCharts.setAbp(r.abp);          // CA ABP plot
+    caCharts.setAbp(r.abp);          // CA ABP plot (empty if no data)
     if (sessionData) sessionData.abp = r.abp;
     await refreshPITrace();          // PI ABP plot re-fetches (reads state.abp)
-    ABP_SELECT_IDS.forEach(id => { $(id).value = String(r.abp_source_index); });
-    appendLog(`ABP source switched to ${r.abp_source}. (Re-run Calculate MX to use it.)`);
-    toast(`ABP source: ${r.abp_source}`, 'success');
+    ABP_SELECT_IDS.forEach(id => { $(id).value = source; });
+    if (r.has_data) {
+      appendLog(`ABP source switched to ${r.abp_source}. (Re-run Calculate MX to use it.)`);
+      toast(`ABP source: ${r.abp_source}`, 'success');
+    } else {
+      appendLog(`ABP source ${source}: no data in this recording — plot is empty. Pick another source.`);
+      toast(`${source} has no data — plot is empty`, 'info');
+    }
   } catch (err) {
     toast(err.message, 'error');
     appendLog('ABP source error: ' + err.message);
