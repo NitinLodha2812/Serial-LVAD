@@ -288,27 +288,26 @@ controls live in one place on the **Main screen** (not on the CA/CVR tabs):
    and selection windows for review.
 4. **Save Progress (JSON)** at any time writes a small, reopenable snapshot of
    every tag's results.
-5. When the whole study is done, **Export All Study (zip)** produces a single
-   download whose workbook layout depends on the study:
-   - **Serial LVAD** — **one workbook for the session** (each session is its own
-     recording), with up to **6 tabs**: `MCA_CA`, `MCA_CVR`, `MCA_PI`, `PCA_CA`,
-     `PCA_CVR`, `PCA_PI` (fewer if a vessel or analysis wasn't collected).
-   - **RAMPs** — **one workbook per speed**, each with up to **3 tabs**: `CA`,
-     `CVR`, `PI`.
-   - plus one **`*_Master.xlsx`** (raw data + edits, written **once**; skipped
-     after a JSON reopen with no raw data), a **`*_Master.txt`** — the same
-     cleaned data as a comma-delimited text file in the original recording's
-     format, so the edited data can be reloaded without re-deleting the same
-     segments — and one **`*_progress.json`**.
-
-**PI is part of this export** alongside CA and CVR (the standalone PI Demographics
-workbook has been removed). Each PI tab lists **one row per beat** — `Beat`,
-`Type`, `Start_s`, `End_s`, the TCD metrics (`TCD_Hi`, `TCD_Lo`, `TCD_Mean`,
-`TCD_PulseAmp`, `TCD_PI`) and, once TCD↔ABP sync is set, the `ABP_*` metrics.
-The per-beat rows are followed by **Native average** and **Artificial average**
-rows carrying the mean of each metric over that class. For Serial LVAD, PI is
-`MCA_PI` / `PCA_PI` by the vessel tag; for RAMPs it is the speed's `PI` tab. The
-CVR tab is a compact metric/value table.
+5. When the whole study is done, **Export All Study (zip)** produces **one Excel
+   workbook per patient** plus one **`*_progress.json`** (and a cleaned
+   **`*_Master.txt`** — see below), zipped. The single workbook contains:
+   - **Master** + **Marks** sheets (the raw data with edits; skipped after a JSON
+     reopen with no raw data).
+   - **CA** and **CVR** sheets, one of each **per speed** (RAMPs: `CA Speed…`,
+     `CVR Speed…`) or **per vessel** (Serial: `MCA CA`, `MCA CVR`, `PCA CA`,
+     `PCA CVR`). The CA sheet keeps the per-window table but shows **FinalMX once**
+     (first row) instead of repeating it; the CVR sheet puts the **baseline and
+     hypercapnic epochs side by side** plus a **summary block** of the CVR values.
+   - a single **PI** sheet for the whole study (all speeds/vessels) in
+     **long format** for conversion to wide format in STATA: `Subject ID`
+     (numeric), `Order`, `Speed (#)` (RAMPs) or `Vessel (MCA=1, PCA=2)` (Serial),
+     `Beat Type (Native=1, Artificial=2)`, `Beat #`, the per-beat `Hi`/`Lo`/
+     `Mean`/`PA`/`PI`, then `Avg Hi`…`Avg PI` — the per-group averages repeated on
+     every row of each Native/Artificial group (unmerged). Artificial beats carry
+     no Mean, and their PI uses the average of the native means.
+   - the **`*_Master.txt`** is the Master sheet as a comma-delimited text file in
+     the original recording's format, so the edited data can be reloaded without
+     re-deleting the same segments.
 
 ### Reopening a saved study
 

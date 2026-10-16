@@ -205,22 +205,68 @@ _CVR_SUMMARY_ORDER = [
 ]
 
 
+def _numeric_id(text) -> "int | None":
+    """The numeric portion of a string (VAD051 -> 51, R125 -> 125, 'Speed 4' -> 4,
+    '9600' -> 9600). None if there are no digits."""
+    digits = re.sub(r"\D", "", str(text or ""))
+    return int(digits) if digits else None
+
+
 def _ca_frame(ca: dict):
-    """CA tab = the per-window CA table (Time/TCD/ABP/MAP/MFV/Corr/MX/MeanMFV)."""
-    if ca and ca.get("table"):
-        return pd.DataFrame(ca["table"])
-    return None
+    """CA sheet = the per-window CA table (Time/TCD/ABP/MAP/MFV/Corr/MX/MeanMFV).
+    FinalMX and MeanMFV are scalars, so they appear once (first row) rather than
+    being repeated down the whole column."""
+    if not (ca and ca.get("table")):
+        return None
+    df = pd.DataFrame(ca["table"])
+    for col in ("FinalMX", "MeanMFV"):
+        if col in df.columns and len(df) > 1:
+            first = df[col].iloc[0]
+            df[col] = [first] + [None] * (len(df) - 1)
+    return df
+
+
+# The CVR summary values that go in the combined CVR sheet's side block, in order.
+_CVR_SHEET_SUMMARY = [
+    ("base_mcbf", "Base MCBF"), ("base_wcbf", "Base WCBF"), ("base_co2", "Base CO2"),
+    ("hyp_mcbf", "Hyp MCBF"), ("hyp_wcbf", "Hyp WCBF"), ("hyp_co2", "Hyp CO2"),
+    ("delta_mcbf", "Delta MCBF"), ("delta_wcbf", "Delta WCBF"), ("delta_co2", "Delta CO2"),
+    ("mcvr", "MCVR"), ("wcvr", "WCVR"),
+]
 
 
 def _cvr_frame(cvr: dict):
-    """CVR tab = one compact key/value table of the computed values."""
+    """CVR sheet = the baseline and hypercapnic epoch samples side by side, plus a
+    summary block of the CVR values (one sheet, replacing the old separate
+    baseline/hypercapnia/summary sheets)."""
     if not cvr:
         return None
-    s = cvr.get("summary") if isinstance(cvr, dict) and "summary" in cvr else cvr
-    s = s or {}
-    rows = [{"Metric": label, "Value": s.get(key)}
-            for key, label in _CVR_SUMMARY_ORDER if s.get(key) is not None]
-    return pd.DataFrame(rows, columns=["Metric", "Value"]) if rows else None
+    base = cvr.get("baseline") or {}
+    hyp = cvr.get("hypercapnia") or {}
+    s = cvr.get("summary") or cvr or {}
+    bt, bm, be = base.get("Time_s", []), base.get("meanU", []), base.get("envU", [])
+    ht, hm, he = hyp.get("Time_s", []), hyp.get("meanU", []), hyp.get("envU", [])
+    summary = [(label, s.get(key)) for key, label in _CVR_SHEET_SUMMARY if s.get(key) is not None]
+    n = max(len(bt), len(ht), len(summary))
+    if n == 0:
+        return None
+
+    def at(lst, i):
+        return lst[i] if i < len(lst) else None
+
+    cols = ["Baseline Time", "baseline meanU", "baseline envU", " ",
+            "Hypercapnic Time", "Hypercapnic meanU", "Hypercapnic envU", "  ",
+            "Metric", "Value"]
+    rows = []
+    for i in range(n):
+        lab, val = summary[i] if i < len(summary) else (None, None)
+        rows.append({
+            "Baseline Time": at(bt, i), "baseline meanU": at(bm, i), "baseline envU": at(be, i),
+            " ": None,
+            "Hypercapnic Time": at(ht, i), "Hypercapnic meanU": at(hm, i), "Hypercapnic envU": at(he, i),
+            "  ": None, "Metric": lab, "Value": val,
+        })
+    return pd.DataFrame(rows, columns=cols)
 
 
 def pi_epochs_frame(tcd_epochs: list, abp_epochs: list = None):
@@ -303,20 +349,73 @@ def _merge_cacvr_by_vessel(cacvr_sessions: list) -> dict:
     return out
 
 
-def _pi_frame_for_session(s: dict):
-    """PI tab for one tag's session (TCD + ABP epochs it stored)."""
-    return pi_epochs_frame(s.get("pi_epochs", []) or [], s.get("pi_abp_epochs", []) or [])
-
-
-def _pi_frame_for_vessel(cacvr_sessions: list, vessel: str):
-    """Serial LVAD: the tag IS the vessel, so PI for a vessel comes from the tag
-    whose label matches (concatenated if more than one messy label matches)."""
-    tcd, abp = [], []
+def _pi_epochs_for_vessel(cacvr_sessions: list, vessel: str) -> list:
+    """Serial LVAD: the tag IS the vessel, so a vessel's PI beats come from the
+    tag(s) whose label matches."""
+    out = []
     for s in cacvr_sessions:
         if (s.get("label") or "").strip().upper() == vessel:
-            tcd.extend(s.get("pi_epochs", []) or [])
-            abp.extend(s.get("pi_abp_epochs", []) or [])
-    return pi_epochs_frame(tcd, abp)
+            out.extend(s.get("pi_epochs", []) or [])
+    return out
+
+
+# Metric key -> column label for the long-format PI sheet.
+_PI_LONG_METRICS = [("max", "Hi"), ("min", "Lo"), ("mean", "Mean"),
+                    ("pulse_amp", "PA"), ("pi", "PI")]
+
+
+def _pi_long_rows(epochs: list, key_fields: dict, subject_id):
+    """Rows for one speed/vessel group in the long-format PI sheet. PI is resolved
+    the group's way (artificial PI uses the average native mean), and each row
+    carries the per-variable averages for its own Native/Artificial group,
+    repeated on every row of that group (unmerged)."""
+    resolved = pi_analysis.numbered(pi_analysis.resolve_pi(epochs))
+    rows = []
+    for type_name, type_code in ((pi_analysis.NATIVE, 1), (pi_analysis.ARTIFICIAL, 2)):
+        grp = [e for e in resolved if e["type"] == type_name]
+        if not grp:
+            continue
+        avg = pi_analysis.average_metrics(grp)
+        for e in grp:
+            row = {"Subject ID": subject_id, **key_fields,
+                   "Beat Type (Native=1, Artificial=2)": type_code, "Beat #": e["ordinal"]}
+            for mkey, label in _PI_LONG_METRICS:
+                row[label] = e.get(mkey)
+            for mkey, label in _PI_LONG_METRICS:
+                row["Avg " + label] = avg.get(mkey)
+            rows.append(row)
+    return rows
+
+
+def _pi_long_frame(state: SessionState, cacvr_sessions: list):
+    """One long-format PI sheet for the whole study (all speeds for RAMPs, both
+    vessels for Serial), for conversion to wide format in STATA. Columns are
+    numeric codes per the agreed template; averages repeat per
+    Native/Artificial group within each speed/vessel."""
+    subject = _numeric_id(state.patient_id)
+    ramps = state.study_mode == MODE_RAMPS
+    rows = []
+    if ramps:
+        for order, s in enumerate(cacvr_sessions, start=1):
+            eps = s.get("pi_epochs", []) or []
+            if not eps:
+                continue
+            rows += _pi_long_rows(eps, {"Order": order, "Speed (#)": _numeric_id(s.get("label"))}, subject)
+        key_cols = ["Order", "Speed (#)"]
+    else:
+        order = _numeric_id(state.session) or 1
+        for vessel, code in (("MCA", 1), ("PCA", 2)):
+            eps = _pi_epochs_for_vessel(cacvr_sessions, vessel)
+            if not eps:
+                continue
+            rows += _pi_long_rows(eps, {"Order": order, "Vessel (MCA=1, PCA=2)": code}, subject)
+        key_cols = ["Order", "Vessel (MCA=1, PCA=2)"]
+    if not rows:
+        return None
+    cols = (["Subject ID"] + key_cols + ["Beat Type (Native=1, Artificial=2)", "Beat #"]
+            + [lab for _, lab in _PI_LONG_METRICS]
+            + ["Avg " + lab for _, lab in _PI_LONG_METRICS])
+    return pd.DataFrame(rows, columns=cols)
 
 
 def save_excel(state: SessionState, out_dir: str) -> str:
@@ -363,19 +462,63 @@ def save_session_excel(results: dict, path: str) -> int:
     return n
 
 
+def _marks_frame(state: SessionState):
+    if not state.marks_labels:
+        return None
+    return pd.DataFrame({"Time_s": state.marks_times, "Label": state.marks_labels})
+
+
+def _study_frames(state: SessionState, cacvr_sessions: list) -> list:
+    """The (sheet_name, dataframe) list for the single study workbook:
+    Master + Marks, then one CA and one CVR sheet per speed (RAMPs) or vessel
+    (Serial), then one long-format PI sheet. Sheet names are made unique and
+    trimmed to Excel's 31-char limit."""
+    frames = []
+    if state.raw_headers and state.raw_rows:
+        frames.append(("Master", _master_dataframe(state)))
+        frames.append(("Marks", _marks_frame(state)))
+
+    used = set()
+
+    def sheet(name):
+        name = name[:31]
+        out, i = name, 2
+        while out.lower() in used:
+            suffix = f" {i}"
+            out = name[:31 - len(suffix)] + suffix
+            i += 1
+        used.add(out.lower())
+        return out
+
+    if state.study_mode == MODE_RAMPS:
+        for s in cacvr_sessions:
+            label = s.get("label") or "speed"
+            r = s.get("results", {}) or {}
+            frames.append((sheet(f"CA {label}"),  _ca_frame((r.get("CA") or {}).get("MCA"))))
+            frames.append((sheet(f"CVR {label}"), _cvr_frame((r.get("CVR") or {}).get("MCA"))))
+    else:
+        vessels = _merge_cacvr_by_vessel(cacvr_sessions)
+        for v in ("MCA", "PCA"):
+            frames.append((sheet(f"{v} CA"),  _ca_frame(vessels[v]["CA"])))
+            frames.append((sheet(f"{v} CVR"), _cvr_frame(vessels[v]["CVR"])))
+
+    frames.append((sheet("PI"), _pi_long_frame(state, cacvr_sessions)))
+    return frames
+
+
 def export_all_cacvr(state: SessionState, cacvr_sessions: list, out_dir: str):
     """
-    Bundle the whole study into one zip. Workbook layout is mode-specific:
+    Bundle the whole study per the agreed format: ONE Excel workbook per patient
+    plus one progress JSON, zipped (with the cleaned Master as text too).
 
-      Serial LVAD — ONE workbook per session (the recording), up to 6 tabs:
-                    MCA_CA, MCA_CVR, MCA_PI, PCA_CA, PCA_CVR, PCA_PI
-                    (fewer if a vessel/analysis wasn't collected).
-      RAMPs       — ONE workbook per speed, up to 3 tabs: CA, CVR, PI.
-
-    PI beats travel with each tag's session (there is no separate PI store);
-    the PI tab lists one row per beat with TCD (and, after sync, ABP) metrics.
-    Plus a `*_Master.xlsx` (raw data + edits, written once, skipped after a
-    JSON reopen with no raw data) and a `*_progress.json`.
+    The single workbook holds:
+      - Master + Marks (the raw data with edits, skipped after a JSON reopen with
+        no raw data),
+      - one CA sheet and one CVR sheet per speed (RAMPs) or per vessel (Serial:
+        MCA CA, MCA CVR, PCA CA, PCA CVR) — FinalMX shown once, the CVR baseline
+        and hypercapnic epochs combined on one sheet with a summary block,
+      - one long-format PI sheet for the whole study (all speeds/vessels), with
+        numeric codes and per-group averages, for conversion to wide format.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     patient = _safe_stem(state.patient_id) or "patient"
@@ -383,50 +526,16 @@ def export_all_cacvr(state: SessionState, cacvr_sessions: list, out_dir: str):
     workdir = tempfile.mkdtemp()
     manifest = []
     try:
+        wbname = f"{base}.xlsx"
+        _workbook_from_frames(os.path.join(workdir, wbname), _study_frames(state, cacvr_sessions))
+        manifest.append(wbname)
+
+        # The cleaned Master as comma-delimited text, so the edited data can be
+        # reloaded without re-deleting the same segments each time.
         if state.raw_headers and state.raw_rows:
-            master_name = f"{base}_Master.xlsx"
-            save_master_excel(state, os.path.join(workdir, master_name))
-            manifest.append(master_name)
-            # Also the cleaned Master as comma-delimited text, so the edited data
-            # can be reloaded without re-deleting the same segments each time.
             master_txt = f"{base}_Master.txt"
             save_master_text(state, os.path.join(workdir, master_txt))
             manifest.append(master_txt)
-
-        used = set()
-
-        def unique(name):
-            out, i = name, 2
-            while out in used:
-                out = name[:-5] + f"_{i}.xlsx"; i += 1
-            used.add(out)
-            return out
-
-        if state.study_mode == MODE_RAMPS:
-            # One workbook per speed (tag), tabs CA / CVR / PI (MCA-only study).
-            for s in cacvr_sessions:
-                label = s.get("label") or ""
-                r = s.get("results", {}) or {}
-                frames = [
-                    ("CA",  _ca_frame((r.get("CA") or {}).get("MCA"))),
-                    ("CVR", _cvr_frame((r.get("CVR") or {}).get("MCA"))),
-                    ("PI",  _pi_frame_for_session(s)),
-                ]
-                wbname = unique(f"{patient}_{_safe_stem(label) or 'speed'}.xlsx")
-                _workbook_from_frames(os.path.join(workdir, wbname), frames)
-                manifest.append(wbname)
-        else:
-            # Serial LVAD: one workbook for the session, MCA/PCA × CA/CVR/PI.
-            vessels = _merge_cacvr_by_vessel(cacvr_sessions)
-            frames = []
-            for v in ("MCA", "PCA"):
-                frames.append((f"{v}_CA",  _ca_frame(vessels[v]["CA"])))
-                frames.append((f"{v}_CVR", _cvr_frame(vessels[v]["CVR"])))
-                frames.append((f"{v}_PI",  _pi_frame_for_vessel(cacvr_sessions, v)))
-            sess = _safe_stem(state.session) or "session"
-            wbname = unique(f"{patient}_{sess}.xlsx")
-            _workbook_from_frames(os.path.join(workdir, wbname), frames)
-            manifest.append(wbname)
 
         json_name = f"{base}_progress.json"
         _write_progress_json(state, cacvr_sessions, os.path.join(workdir, json_name))
