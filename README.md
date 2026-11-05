@@ -349,7 +349,14 @@ reset too. It asks for confirmation and cannot be undone.
 
 **Linked deletions:** brushing a signal to NaN on any tab edits the one shared
 copy of that signal, so the deletion applies to every tab's calculations *and*
-is echoed visually onto the same signal's plot on the other tabs.
+is echoed visually onto the same signal's plot on the other tabs. The **PI tab's
+ABP plot** can also be edited: drag a rectangle on it and press **Replace with
+NaN** to delete those ABP datapoints (the deletion applies everywhere, like the
+CA/CVR edits).
+
+**Plot resolution:** the two **CA** plots fetch the on-screen slice at the same
+**adaptive full resolution** as the PI tab (re-fetched as you zoom or pan), so
+brief ABP/TCD features are not smoothed away by fixed decimation.
 
 ### Navigating the plots (all tabs)
 
@@ -367,7 +374,9 @@ coverage). To override it, use the small **dropdown built into the plot title**
 `A-LINE`, `reABP`), even when a recording has no column or no data for one; a
 source with no data is marked "— no data" and selecting it leaves the plot empty
 and prompts you to pick another. Automatic selection is unchanged. Both ABP plots
-stay in sync; re-run **Calculate MX** to recompute with the chosen source.
+stay in sync; re-run **Calculate MX** to recompute with the chosen source. Any
+ABP **deletions carry across a source switch** — switching sources and back keeps
+your edits instead of resetting to the unedited column.
 
 On the PI tab both plots stay X-synced as you zoom or pan, and removed (NaN)
 samples show as a **break in the line** rather than being bridged over, matching

@@ -487,6 +487,9 @@ class SessionState:
         self.abp_source_index = index
         if isinstance(self.column_positions, dict):
             self.column_positions["abp"] = index
+        # Re-apply any ABP deletions so switching sources (and back) keeps the
+        # edits instead of resetting to the unedited column.
+        self.reapply_edits("abp")
         return self.raw_headers[index]
 
     def apply_nan_ranges(self, signal: str, ranges: list) -> int:
@@ -511,11 +514,14 @@ class SessionState:
                 total += n
         return total
 
-    def reapply_edits(self) -> int:
-        """Re-apply every recorded edit to the current signals (used after a raw
-        recording is paired with a restored edit_log on reopen)."""
+    def reapply_edits(self, signal: str = None) -> int:
+        """Re-apply recorded edits to the current signals. With `signal` given,
+        only that signal's edits are re-applied (used after switching the ABP
+        source, which reloads a fresh column that would otherwise drop the
+        edits); otherwise all edits (used on reopen)."""
         return sum(self.apply_nan_ranges(e.get("signal"), e.get("ranges", []))
-                   for e in (self.edit_log or []))
+                   for e in (self.edit_log or [])
+                   if signal is None or e.get("signal") == signal)
 
     def abp_source_options(self) -> list:
         """The three ABP sources the manual dropdown always offers — fiABP,

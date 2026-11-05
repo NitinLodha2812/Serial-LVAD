@@ -379,25 +379,28 @@ class CACharts {
     this.chart2 = null;
     this.marksVisible = new Set();
     this.onBrushChange = () => {};   // host sets this to track brush state
+    this.onViewChange = () => {};    // fires after zoom/pan so the host refetches
   }
 
   init(data) {
     this.destroy();
-    const envPts = xyData(data.time, data.env_u);
-    const abpPts = xyData(data.time, data.abp);
+    // Gapped so removed (NaN) samples break the line; the trace is later swapped
+    // for the on-screen slice at the same adaptive resolution as the PI tab.
+    const envPts = xyDataGapped(data.time, data.env_u);
+    const abpPts = xyDataGapped(data.time, data.abp || []);
 
     this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
     const ann = markAnnotations(data.marks_labels, data.marks_times, this.marksVisible);
 
     this.chart1 = new Chart(document.getElementById('caPlot1'), {
       type: 'line',
-      data: { datasets: [{ data: envPts, borderColor: COLORS.envU, label: 'envU' }] },
+      data: { datasets: [{ data: envPts, borderColor: COLORS.envU, label: 'envU', spanGaps: false }] },
       options: makeChartOptions('cm/s²', { ...ann }),
     });
 
     this.chart2 = new Chart(document.getElementById('caPlot2'), {
       type: 'line',
-      data: { datasets: [{ data: abpPts, borderColor: COLORS.abp, label: 'ABP' }] },
+      data: { datasets: [{ data: abpPts, borderColor: COLORS.abp, label: 'ABP', spanGaps: false }] },
       options: makeChartOptions('mmHg', { ...ann }),
     });
 
@@ -421,11 +424,22 @@ class CACharts {
 
   _charts() { return [this.chart1, this.chart2].filter(Boolean); }
 
-  // Replace the ABP trace (chart2) after the source column is switched.
+  /* Swap in a freshly-fetched (higher-resolution) trace on both plots, leaving
+     the selection/mark annotations in place. Mirrors PIChart.setTrace so the CA
+     plots render at the same adaptive resolution as the PI tab. */
+  setTrace(time, env, abp) {
+    this._lastTrace = { time, env: env || [], abp: abp || [] };
+    if (this.chart1) { this.chart1.data.datasets[0].data = xyDataGapped(time, env || []); this.chart1.update('none'); }
+    if (this.chart2) { this.chart2.data.datasets[0].data = xyDataGapped(time, abp || []); this.chart2.update('none'); }
+  }
+
+  // Replace the ABP trace (chart2) after the source column is switched (fallback
+  // when a fresh adaptive trace isn't being fetched). `abpArr` matches the
+  // overview time (same decimation).
   setAbp(abpArr) {
     if (!this.chart2 || !this.data) return;
     this.data.abp = abpArr;
-    this.chart2.data.datasets[0].data = xyData(this.data.time, abpArr);
+    this.chart2.data.datasets[0].data = xyDataGapped(this.data.time, abpArr);
     this.chart2.update('none');
   }
 
@@ -468,6 +482,7 @@ class CACharts {
     this._charts().forEach(t => {
       t.options.scales.x.min = min; t.options.scales.x.max = max; t.update('none');
     });
+    this.onViewChange();
   }
 
   _syncZoom() {
@@ -477,6 +492,8 @@ class CACharts {
       tgt.options.scales.x.min = src.scales.x.min;
       tgt.options.scales.x.max = src.scales.x.max;
       tgt.update('none');
+      // Refetch the on-screen slice at full resolution (same as the PI tab).
+      this.onViewChange();
     };
     c1.options.plugins.zoom.zoom.onZoomComplete = () => syncTo(c1, c2);
     c2.options.plugins.zoom.zoom.onZoomComplete = () => syncTo(c2, c1);
@@ -851,6 +868,7 @@ class PIChart {
     this.abpChart = null;    // fiABP/reABP — X-synced context, epoch spans shown
     this.marksVisible = new Set();
     this.onBrushChange = () => {};
+    this.onAbpBrushChange = () => {};  // host tracks the ABP-plot brush for editing
     this.onViewChange = () => {};   // fires after zoom/pan so the host refetches
     this._syncing = false;          // guard against zoom-sync feedback loops
     this.abpShift = 0;              // TCD->ABP display shift (seconds)
@@ -911,9 +929,10 @@ class PIChart {
         data: { datasets: [{ label: '_trace', data: xyDataGapped(data.time, data.abp || []), borderColor: COLORS.abp, spanGaps: false }] },
         options: abpOpts,
       });
-      // Tag with the 'abp' signal (inactive brush) so a deletion made on the
-      // CA tab's ABP plot is echoed here, but brushing stays on the TCD plot.
-      attachBrush(this.abpChart, 'abp', () => {}, { allowPan: true });
+      // The ABP plot carries its own 'abp' brush so the operator can delete
+      // (NaN) ABP datapoints here too — independent of the TCD beat-selection
+      // brush. A deletion made on the CA tab's ABP plot is still echoed here.
+      attachBrush(this.abpChart, 'abp', (s) => this.onAbpBrushChange(s), { allowPan: true });
     }
 
     this.data = data;
@@ -969,7 +988,7 @@ class PIChart {
     return c.scales.x.getValueForPixel(event.clientX - rect.left);
   }
 
-  /* ── brush API (mirrors CACharts / CVRCharts) — brushing is TCD-only ── */
+  /* ── brush API ── TCD brush selects beats; ABP brush deletes ABP points ── */
   setBrushMode(on) { setChartBrushMode(this.chart, on); }
   activeBrush() {
     const c = this.chart;
@@ -977,6 +996,18 @@ class PIChart {
     return null;
   }
   clearBrush() { clearChartBrush(this.chart); }
+  // The ABP plot's own brush, used to delete ABP datapoints from the PI tab.
+  activeAbpBrush() {
+    const c = this.abpChart;
+    if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
+    return null;
+  }
+  clearAbpBrush() { clearChartBrush(this.abpChart); }
+  applyNaNLocally() {
+    const ab = this.activeAbpBrush();
+    if (!ab) return 0;
+    return applyNaNToChartLocally(ab.chart);
+  }
   applyNaNToSignal(signal, rect) {
     return this._allCharts().reduce((n, c) => n + nullSignalOnChart(c, signal, rect), 0);
   }

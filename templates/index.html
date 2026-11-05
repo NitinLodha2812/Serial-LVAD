@@ -292,8 +292,9 @@
         <div class="plot-card">
           <div class="plot-title">
             <select class="title-select" id="piAbpSource" title="ABP source column" disabled></select>
-            <span class="plot-hint">same window · X-synced to TCD ·
+            <span class="plot-hint">same window · X-synced to TCD · drag to delete points ·
               <span class="timing-flag">timing offset TBD</span></span>
+            <button class="btn btn-danger btn-sm" id="piAbpNanBtn" title="Delete the brushed ABP datapoints" disabled>Replace with NaN</button>
           </div>
           <div class="plot-wrap short"><canvas id="piPlotAbp"></canvas></div>
         </div>

@@ -173,6 +173,7 @@ $('fileInput').addEventListener('change', async (e) => {
 
     initAbpSource(sessionData);
     await initPITab();
+    await refreshCaTrace();     // full-resolution CA trace (matches the PI tab)
     await initCacvrSession();
 
     appendLog(`Loaded successfully — ${sessionData.total_samples} samples`);
@@ -373,9 +374,11 @@ async function switchAbpSource(source) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source }),
     });
-    caCharts.setAbp(r.abp);          // CA ABP plot (empty if no data)
     if (sessionData) sessionData.abp = r.abp;
-    await refreshPITrace();          // PI ABP plot re-fetches (reads state.abp)
+    // Re-fetch both tabs' ABP at full resolution from the new source (the server
+    // re-applies any ABP deletions, so switching sources keeps the edits).
+    await refreshCaTrace();          // CA ABP plot
+    await refreshPITrace();          // PI ABP plot
     ABP_SELECT_IDS.forEach(id => { $(id).value = source; });
     if (r.has_data) {
       appendLog(`ABP source switched to ${r.abp_source}. (Re-run Calculate MX to use it.)`);
@@ -428,6 +431,7 @@ $('jsonInput').addEventListener('change', async (e) => {
       updateStatus(true);
       initAbpSource(sessionData);
       await initPITab();
+      await refreshCaTrace();   // full-resolution CA trace (matches the PI tab)
       await initCacvrSession();
       // Draw the first restored tag's windows and PI on top of the init above.
       redrawCacvrSelections(r.loaded_selections);
@@ -1004,6 +1008,60 @@ piChart.onBrushChange = (info) => {
   $('piArtificialBtn').disabled = !has;
   $('piBrushClearBtn').disabled = !has;
 };
+
+// Brushing the PI ABP plot arms the delete button for that plot.
+piChart.onAbpBrushChange = (info) => {
+  $('piAbpNanBtn').disabled = !info.hasBrush;
+};
+
+// Delete (NaN) the ABP datapoints brushed on the PI tab's ABP plot. The ABP
+// trace is drawn shifted by abpShift, so map the brushed display-x back to real
+// sample time before deleting; the deletion is on the shared ABP signal so it
+// echoes onto the CA tab too.
+$('piAbpNanBtn').addEventListener('click', async () => {
+  const ab = piChart.activeAbpBrush();
+  if (!ab) { toast('Drag on the ABP plot first', 'info'); return; }
+  const sh = piChart.abpShift || 0;
+  const rect = { x_min: ab.rect.x_min - sh, x_max: ab.rect.x_max - sh,
+                 y_min: ab.rect.y_min, y_max: ab.rect.y_max };
+  showLoading();
+  try {
+    const res = await api('/api/edit/nan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signal: 'abp', ranges: [rect] }),
+    });
+    piChart.applyNaNLocally();          // gap the ABP plot immediately
+    piChart.clearAbpBrush();
+    broadcastNaN('pi', 'abp', rect);    // echo onto the CA tab's ABP plot
+    $('piAbpNanBtn').disabled = true;
+    await refreshPITrace();
+    appendLog(`PI: Replaced ${res.changed} ABP sample(s) with NaN (applied across all tabs).`);
+    toast(`Replaced ${res.changed} ABP sample(s) with NaN`, 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+    appendLog('PI ABP edit error: ' + err.message);
+  }
+  hideLoading();
+});
+
+/* ── CA plots fetch the on-screen slice at the same adaptive resolution as the
+   PI tab (so brief ABP/TCD features aren't smoothed away by fixed decimation) ── */
+let caTraceTimer = null;
+function scheduleCaTraceRefresh() {
+  clearTimeout(caTraceTimer);
+  caTraceTimer = setTimeout(refreshCaTrace, 150);
+}
+async function refreshCaTrace() {
+  if (!sessionData) return;
+  const { min, max } = caCharts.getXRange();
+  try {
+    const d = await api(`/api/pi/trace?start=${min}&end=${max}`);
+    caCharts.setTrace(d.time, d.env_u, d.abp);
+  } catch (err) {
+    appendLog('CA trace error: ' + err.message);
+  }
+}
+caCharts.onViewChange = scheduleCaTraceRefresh;
 
 /* ── render server state into chart, counters and the two tables ── */
 let piAbpEpochs = [];
