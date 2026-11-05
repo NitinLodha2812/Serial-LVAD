@@ -986,11 +986,23 @@ function schedulePITraceRefresh() {
   piTraceTimer = setTimeout(refreshPITrace, 150);
 }
 
+// Fetch a window a bit wider than what's on screen so the trace reaches the
+// left and right plot edges when zoomed in (Chart.js clips to the axis). Without
+// the padding the first/last fetched sample sits inside the view and the line
+// looks cut off at the front and back.
+function paddedTraceWindow(ctrl) {
+  const { min, max } = ctrl.getXRange();
+  const pad = (max - min) * 0.3 || 0;
+  const lo = Math.max(ctrl.tMin ?? 0, min - pad);
+  const hi = Math.min(ctrl.tMax ?? max, max + pad);
+  return { start: lo, end: hi };
+}
+
 async function refreshPITrace() {
   if (!sessionData) return;
-  const { min, max } = piChart.getXRange();
+  const { start, end } = paddedTraceWindow(piChart);
   try {
-    const d = await api(`/api/pi/trace?start=${min}&end=${max}`);
+    const d = await api(`/api/pi/trace?start=${start}&end=${end}`);
     piChart.setTrace(d.time, d.env_u, d.abp);
     $('piZoomHint').textContent = d.full_res
       ? `full resolution — ${d.time.length.toLocaleString()} samples · drag to brush`
@@ -1053,9 +1065,9 @@ function scheduleCaTraceRefresh() {
 }
 async function refreshCaTrace() {
   if (!sessionData) return;
-  const { min, max } = caCharts.getXRange();
+  const { start, end } = paddedTraceWindow(caCharts);
   try {
-    const d = await api(`/api/pi/trace?start=${min}&end=${max}`);
+    const d = await api(`/api/pi/trace?start=${start}&end=${end}`);
     caCharts.setTrace(d.time, d.env_u, d.abp);
   } catch (err) {
     appendLog('CA trace error: ' + err.message);
