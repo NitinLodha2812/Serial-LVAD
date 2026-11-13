@@ -79,11 +79,20 @@ const brushDrawPlugin = {
 };
 if (typeof Chart !== 'undefined') Chart.register(brushDrawPlugin);
 
+/* A brushed region that spans the full amplitude axis uses these sentinels for
+   its y-bounds. Finite (not ±Infinity) so the rect survives JSON.stringify to
+   the backend; far beyond any physiological velocity/pressure so every sample in
+   the time span is captured. Used by the `fullHeight` brushes (the PI tab), so a
+   brush selects a whole time column with no unselected rectangular gap. */
+const BRUSH_Y_FULL = 1e9;
+
 /* ══════════════════ BRUSH CONTROLLER ══════════════════ */
 /* Attach drag-rectangle brushing to a single Chart.js chart.
    `signal` is the backend name (mean_u / env_u / etco2 / abp).
    `onChange(state)` fires whenever the brushed-points set changes,
-   so the host app can enable/disable "Replace with NaN" buttons. */
+   so the host app can enable/disable "Replace with NaN" buttons.
+   `opts.fullHeight` makes a completed brush span the whole y-axis (time-window
+   selection) instead of clipping to the dragged rectangle's height. */
 function attachBrush(chart, signal, onChange, opts = {}) {
   if (!chart || chart.$brush) return;
   chart.$brush = {
@@ -97,6 +106,8 @@ function attachBrush(chart, signal, onChange, opts = {}) {
     // PI brushes constantly, so it keeps wheel-zoom and shift-pan live rather
     // than trading them away for the drag gesture (see setChartBrushMode).
     allowPan: !!opts.allowPan,
+    // Select the full amplitude range in the brushed time span (no y-clipping).
+    fullHeight: !!opts.fullHeight,
   };
   const canvas = chart.canvas;
 
@@ -133,6 +144,9 @@ function attachBrush(chart, signal, onChange, opts = {}) {
     let y_max = ys.getValueForPixel(Math.min(a.y, c.y));
     if (x_max < x_min) [x_min, x_max] = [x_max, x_min];
     if (y_max < y_min) [y_min, y_max] = [y_max, y_min];
+    // A full-height brush selects the whole time column, so dragging any
+    // rectangle in the span grabs every sample (the dragged height is ignored).
+    if (chart.$brush.fullHeight) { y_min = -BRUSH_Y_FULL; y_max = BRUSH_Y_FULL; }
     chart.$brush.rect = { x_min, x_max, y_min, y_max };
     _refreshBrushedOverlay(chart);
     chart.$brush.onChange({ hasBrush: true, signal: chart.$brush.signal, rect: chart.$brush.rect });
@@ -600,6 +614,11 @@ class CVRCharts {
     this.chart3 = null;    // CO2 waveform (was ETCO2 + CO2; ETCO2 removed)
     this.marksVisible = new Set();
     this.onBrushChange = () => {};
+    this.onViewChange = () => {};   // fires after zoom/pan so the host refetches
+    // Display offset (seconds) applied to the mean TCD trace so it lines up with
+    // the envelope TCD, which it lags by the moving-average window. Set by the
+    // host; applied to the mean plot only (chart1).
+    this.meanShift = 0;
   }
 
   // TCD plots (meanU, envU) are where the baseline/hypercapnia windows live;
@@ -610,8 +629,12 @@ class CVRCharts {
 
   init(data) {
     this.destroy();
-    const meanPts = xyData(data.time, data.mean_u);
-    const envPts  = xyData(data.time, data.env_u);
+    // Gapped (spanGaps:false) so removed/NaN samples break the line; the TCD
+    // traces are later swapped for the on-screen slice at the PI tab's adaptive
+    // resolution. The mean plot is drawn shifted by meanShift to line up with
+    // the envelope.
+    const meanPts = xyDataGapped(data.time, data.mean_u, this.meanShift || 0);
+    const envPts  = xyDataGapped(data.time, data.env_u);
     const co2Pts  = xyData(data.time, data.co2 || []);
 
     this.marksVisible = new Set(data.marks_labels.map((_, i) => i));
@@ -619,13 +642,13 @@ class CVRCharts {
 
     this.chart1 = new Chart(document.getElementById('cvrPlot1'), {
       type: 'line',
-      data: { datasets: [{ data: meanPts, borderColor: COLORS.meanU, label: 'main' }] },
+      data: { datasets: [{ data: meanPts, borderColor: COLORS.meanU, label: 'main', spanGaps: false }] },
       options: makeChartOptions('meanU', { ...ann }),
     });
 
     this.chart2 = new Chart(document.getElementById('cvrPlot2'), {
       type: 'line',
-      data: { datasets: [{ data: envPts, borderColor: COLORS.envU, label: 'main' }] },
+      data: { datasets: [{ data: envPts, borderColor: COLORS.envU, label: 'main', spanGaps: false }] },
       options: makeChartOptions('envU', { ...ann }),
     });
 
@@ -651,6 +674,25 @@ class CVRCharts {
     this.tMax = data.duration_s || (data.time.length ? data.time[data.time.length - 1] : 1);
     this._syncZoom();
     this.data = data;
+  }
+
+  /* Swap in a freshly-fetched (higher-resolution) trace on the two TCD plots,
+     leaving the baseline/hypercapnia/mark annotations in place. The mean plot is
+     drawn shifted by meanShift so it lines up with the envelope. The CO2 plot is
+     left on its overview trace (it only carries the two picked points). */
+  setTrace(time, mean, env) {
+    this._lastTrace = { time, mean: mean || [], env: env || [] };
+    if (this.chart1) { this.chart1.data.datasets[0].data = xyDataGapped(time, mean || [], this.meanShift || 0); this.chart1.update('none'); }
+    if (this.chart2) { this.chart2.data.datasets[0].data = xyDataGapped(time, env || []); this.chart2.update('none'); }
+  }
+
+  // Set the mean-TCD display offset and redraw the mean plot from the last trace.
+  setMeanShift(shift) {
+    this.meanShift = shift || 0;
+    if (this.chart1 && this._lastTrace) {
+      this.chart1.data.datasets[0].data = xyDataGapped(this._lastTrace.time, this._lastTrace.mean, this.meanShift);
+      this.chart1.update('none');
+    }
   }
 
   // ── brush API used by app.js ──
@@ -687,26 +729,23 @@ class CVRCharts {
         t.options.scales.x.min = min; t.options.scales.x.max = max; t.update('none');
       });
     }
+    this.onViewChange();
   }
 
   _syncZoom() {
     const charts = this._allCharts();
+    const syncFrom = (source) => {
+      charts.filter(c => c !== source).forEach(t => {
+        t.options.scales.x.min = source.scales.x.min;
+        t.options.scales.x.max = source.scales.x.max;
+        t.update('none');
+      });
+      // Refetch the on-screen slice at full resolution (same as the PI tab).
+      this.onViewChange();
+    };
     charts.forEach(source => {
-      const others = charts.filter(c => c !== source);
-      source.options.plugins.zoom.zoom.onZoomComplete = () => {
-        others.forEach(t => {
-          t.options.scales.x.min = source.scales.x.min;
-          t.options.scales.x.max = source.scales.x.max;
-          t.update('none');
-        });
-      };
-      source.options.plugins.zoom.pan.onPanComplete = () => {
-        others.forEach(t => {
-          t.options.scales.x.min = source.scales.x.min;
-          t.options.scales.x.max = source.scales.x.max;
-          t.update('none');
-        });
-      };
+      source.options.plugins.zoom.zoom.onZoomComplete = () => syncFrom(source);
+      source.options.plugins.zoom.pan.onPanComplete = () => syncFrom(source);
     });
     charts.forEach(c => c.update('none'));
   }
@@ -916,7 +955,13 @@ class PIChart {
       data: { datasets: [{ label: '_trace', data: xyDataGapped(data.time, data.env_u), borderColor: COLORS.envU, spanGaps: false }] },
       options: envOpts,
     });
-    attachBrush(this.chart, 'env_u', (s) => this.onBrushChange(s), { allowPan: true });
+    // Brushing a beat selects the whole time column (fullHeight) so the epoch's
+    // Hi/Lo aren't clipped by the dragged rectangle's height, and the highlight
+    // has no unselected rectangular gap. Brushing one plot clears the other's
+    // brush so there is a single active selection at a time.
+    attachBrush(this.chart, 'env_u',
+      (s) => { if (s.hasBrush) this._clearOtherBrush(this.chart); this.onBrushChange(s); },
+      { allowPan: true, fullHeight: true });
 
     // ── fiABP / reABP (context, X-synced) ──
     const abpEl = document.getElementById('piPlotAbp');
@@ -929,10 +974,14 @@ class PIChart {
         data: { datasets: [{ label: '_trace', data: xyDataGapped(data.time, data.abp || []), borderColor: COLORS.abp, spanGaps: false }] },
         options: abpOpts,
       });
-      // The ABP plot carries its own 'abp' brush so the operator can delete
-      // (NaN) ABP datapoints here too — independent of the TCD beat-selection
-      // brush. A deletion made on the CA tab's ABP plot is still echoed here.
-      attachBrush(this.abpChart, 'abp', (s) => this.onAbpBrushChange(s), { allowPan: true });
+      // The ABP plot carries its own 'abp' brush so the operator can clean (NaN)
+      // ABP datapoints AND select beats here too (its display x is already
+      // TCD-aligned by the sync shift). fullHeight so a drag grabs the whole
+      // time column; brushing it clears the TCD brush. A deletion made on the CA
+      // tab's ABP plot is still echoed here.
+      attachBrush(this.abpChart, 'abp',
+        (s) => { if (s.hasBrush) this._clearOtherBrush(this.abpChart); this.onAbpBrushChange(s); },
+        { allowPan: true, fullHeight: true });
     }
 
     this.data = data;
@@ -988,23 +1037,43 @@ class PIChart {
     return c.scales.x.getValueForPixel(event.clientX - rect.left);
   }
 
-  /* ── brush API ── TCD brush selects beats; ABP brush deletes ABP points ── */
-  setBrushMode(on) { setChartBrushMode(this.chart, on); }
+  /* ── brush API ── both the TCD and the ABP plot are brushable; a brush can be
+     committed as a beat (Native/Artificial) or cleaned (Replace with NaN). ── */
+  // Toggle brush mode on BOTH plots so the ABP plot is actually brushable (it
+  // was attached but never activated, so dragging it did nothing before).
+  setBrushMode(on) { this._allCharts().forEach(c => setChartBrushMode(c, on)); }
+  // Clear whichever sibling plot isn't `keep`, so only one brush is live.
+  _clearOtherBrush(keep) {
+    this._allCharts().forEach(c => {
+      if (c !== keep && c.$brush && c.$brush.rect) clearChartBrush(c);
+    });
+  }
   activeBrush() {
     const c = this.chart;
     if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
     return null;
   }
   clearBrush() { clearChartBrush(this.chart); }
-  // The ABP plot's own brush, used to delete ABP datapoints from the PI tab.
+  // The ABP plot's own brush, used to clean ABP datapoints / select beats on ABP.
   activeAbpBrush() {
     const c = this.abpChart;
     if (c && c.$brush && c.$brush.rect) return { chart: c, signal: c.$brush.signal, rect: c.$brush.rect };
     return null;
   }
   clearAbpBrush() { clearChartBrush(this.abpChart); }
+  clearAllBrush() { this.clearBrush(); this.clearAbpBrush(); }
+  // Whichever plot currently holds a brush — TCD preferred. `which` lets the host
+  // un-shift the ABP rect (abp samples) vs use it as-is (TCD-aligned time).
+  activeAnyBrush() {
+    const tcd = this.activeBrush();
+    if (tcd) return { ...tcd, which: 'tcd' };
+    const abp = this.activeAbpBrush();
+    if (abp) return { ...abp, which: 'abp' };
+    return null;
+  }
+  // Gap the active brush's own plot immediately after a NaN delete.
   applyNaNLocally() {
-    const ab = this.activeAbpBrush();
+    const ab = this.activeAnyBrush();
     if (!ab) return 0;
     return applyNaNToChartLocally(ab.chart);
   }

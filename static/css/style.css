@@ -248,6 +248,14 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
+/* Drag-and-drop file open: highlight the Load Study card while a file hovers. */
+#loadCard.dragover {
+  border-color: var(--accent, #2980B9);
+  box-shadow: 0 0 0 2px var(--accent, #2980B9) inset;
+  background: rgba(41, 128, 185, .06);
+}
+.dropzone-hint { opacity: .8; }
+
 .card-header {
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);

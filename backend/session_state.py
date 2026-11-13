@@ -656,6 +656,9 @@ class SessionState:
         return {
             "time":   [round(float(v), 3) for v in t],
             "env_u":  col(self.env_u),
+            # Mean TCD velocity at the same adaptive resolution, so the CVR tab's
+            # TCD plots are as detailed as the PI tab's rather than fixed-decimated.
+            "mean_u": col(self.mean_u),
             # fiABP/reABP alongside the envelope so the PI tab can show the
             # arterial waveform in the same window (X-synced to the TCD plot).
             "abp":    col(self.abp),

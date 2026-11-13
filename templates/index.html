@@ -40,9 +40,10 @@
     <div class="main-grid">
 
       <!-- load study -->
-      <div class="card">
+      <div class="card" id="loadCard">
         <div class="card-header"><h3>Load Study</h3></div>
         <div class="card-body">
+          <p class="card-note dropzone-hint" id="dropHint">Tip: drag a <b>.txt/.csv</b> recording or a <b>.json</b> progress file anywhere here to open it.</p>
           <div class="load-row">
             <button class="btn btn-primary" id="loadSerialBtn">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -285,16 +286,15 @@
         <div class="plot-card">
           <div class="plot-title">
             TCD envU — beat epochs
-            <span class="plot-hint" id="piZoomHint">drag to brush · wheel to zoom · shift+drag to pan</span>
+            <span class="plot-hint" id="piZoomHint">drag to brush (select beats or Replace with NaN) · wheel to zoom · shift+drag to pan</span>
           </div>
           <div class="plot-wrap tall"><canvas id="piPlot"></canvas></div>
         </div>
         <div class="plot-card">
           <div class="plot-title">
             <select class="title-select" id="piAbpSource" title="ABP source column" disabled></select>
-            <span class="plot-hint">same window · X-synced to TCD · drag to delete points ·
+            <span class="plot-hint">same window · X-synced to TCD · drag to brush (select beats or Replace with NaN) ·
               <span class="timing-flag">timing offset TBD</span></span>
-            <button class="btn btn-danger btn-sm" id="piAbpNanBtn" title="Delete the brushed ABP datapoints" disabled>Replace with NaN</button>
           </div>
           <div class="plot-wrap short"><canvas id="piPlotAbp"></canvas></div>
         </div>
@@ -377,7 +377,17 @@
         <button class="btn" id="piBrushBtn" disabled>Brush: ON</button>
         <button class="btn btn-native" id="piNativeBtn" disabled>Select Native</button>
         <button class="btn btn-artificial" id="piArtificialBtn" disabled>Select Artificial</button>
+        <button class="btn btn-danger" id="piNanBtn" title="Replace the brushed datapoints (TCD or ABP) with NaN" disabled>Replace with NaN</button>
         <button class="btn btn-sm" id="piBrushClearBtn" disabled>Clear Brush</button>
+
+        <!-- Y-zoom / X-pan, kept right under Clear Brush per the reviewer's layout -->
+        <div class="nav-controls">
+          <button class="btn btn-sm nav-btn" id="piYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
+          <button class="btn btn-sm nav-btn" id="piYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
+          <button class="btn btn-sm nav-btn" id="piYReset" title="Reset Y axis" disabled>Y ⟲</button>
+          <button class="btn btn-sm nav-btn" id="piPanL" title="Pan left (same window width)" disabled>◀</button>
+          <button class="btn btn-sm nav-btn" id="piPanR" title="Pan right (same window width)" disabled>▶</button>
+        </div>
 
         <div class="section-divider"></div>
 
@@ -408,13 +418,6 @@
           <option value="scale5">Scale to 5 min</option>
         </select>
         <button class="btn btn-sm" id="piZoomBtn" disabled>Apply Zoom</button>
-        <div class="nav-controls">
-          <button class="btn btn-sm nav-btn" id="piYIn" title="Zoom Y in (taller)" disabled>Y ＋</button>
-          <button class="btn btn-sm nav-btn" id="piYOut" title="Zoom Y out (shorter)" disabled>Y －</button>
-          <button class="btn btn-sm nav-btn" id="piYReset" title="Reset Y axis" disabled>Y ⟲</button>
-          <button class="btn btn-sm nav-btn" id="piPanL" title="Pan left (same window width)" disabled>◀</button>
-          <button class="btn btn-sm nav-btn" id="piPanR" title="Pan right (same window width)" disabled>▶</button>
-        </div>
 
         <div class="section-divider"></div>
 
@@ -448,6 +451,24 @@
       <div class="modal-body"><div class="instr-body" id="instrBody"></div></div>
       <div class="modal-footer">
         <button class="btn btn-sm" id="instrClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Drag-drop: choose study mode for a dropped raw recording ── -->
+  <div class="modal-backdrop" id="dropModeModal">
+    <div class="modal">
+      <div class="modal-header">Open recording as…</div>
+      <div class="modal-body">
+        <p class="card-note" id="dropModeFile">—</p>
+        <div class="load-row">
+          <button class="btn btn-primary" id="dropModeSerial">Serial LVAD</button>
+          <button class="btn btn-primary" id="dropModeRamps">RAMPs</button>
+        </div>
+        <p class="card-note">Serial LVAD tags by Vessel (MCA / PCA); RAMPs tags by Speed (MCA only).</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" id="dropModeCancel">Cancel</button>
       </div>
     </div>
   </div>

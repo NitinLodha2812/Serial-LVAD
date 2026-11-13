@@ -6,6 +6,13 @@
 const caCharts = new CACharts();
 const cvrCharts = new CVRCharts();
 const piChart = new PIChart();
+
+// Display offset (seconds) for the mean TCD trace on the CVR tab. The mean lags
+// the envelope by its moving-average window, so the mean plot is drawn shifted
+// earlier by this much to line the two TCD plots up. Display-only (does not
+// change the CVR calculation). Flip the sign to move the mean the other way.
+const CVR_MEAN_SHIFT_S = -4;
+cvrCharts.meanShift = CVR_MEAN_SHIFT_S;
 // Exposed for the browser console / debugging (and headless tests).
 window.caCharts = caCharts; window.cvrCharts = cvrCharts; window.piChart = piChart;
 let sessionData = null;   // overview data from server
@@ -136,14 +143,18 @@ $('loadRampsBtn').addEventListener('click',  () => { pendingMode = 'ramps';     
 
 $('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
+  e.target.value = '';  // allow re-selecting same file
   if (!file) return;
+  await loadRawFile(file, pendingMode);
+});
 
+async function loadRawFile(file, mode) {
   showLoading();
-  appendLog(`Loading ${pendingMode === 'ramps' ? 'RAMPs' : 'Serial LVAD'} file: ${file.name} ...`);
+  appendLog(`Loading ${mode === 'ramps' ? 'RAMPs' : 'Serial LVAD'} file: ${file.name} ...`);
 
   const form = new FormData();
   form.append('file', file);
-  form.append('study_mode', pendingMode);
+  form.append('study_mode', mode);
 
   try {
     sessionData = await api('/api/load', { method: 'POST', body: form });
@@ -174,6 +185,7 @@ $('fileInput').addEventListener('change', async (e) => {
     initAbpSource(sessionData);
     await initPITab();
     await refreshCaTrace();     // full-resolution CA trace (matches the PI tab)
+    await refreshCvrTrace();    // full-resolution CVR TCD traces (mean + env)
     await initCacvrSession();
 
     appendLog(`Loaded successfully — ${sessionData.total_samples} samples`);
@@ -201,8 +213,7 @@ $('fileInput').addEventListener('change', async (e) => {
   }
 
   hideLoading();
-  e.target.value = '';  // allow re-selecting same file
-});
+}
 
 
 /* ═══════════════════════ MARKS ═══════════════════════ */
@@ -401,7 +412,12 @@ $('reopenBtn').addEventListener('click', () => $('jsonInput').click());
 
 $('jsonInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
+  e.target.value = '';
   if (!file) return;
+  await reopenFile(file);
+});
+
+async function reopenFile(file) {
   showLoading();
   appendLog(`Reopening progress file: ${file.name} ...`);
   const form = new FormData();
@@ -432,6 +448,7 @@ $('jsonInput').addEventListener('change', async (e) => {
       initAbpSource(sessionData);
       await initPITab();
       await refreshCaTrace();   // full-resolution CA trace (matches the PI tab)
+      await refreshCvrTrace();  // full-resolution CVR TCD traces (mean + env)
       await initCacvrSession();
       // Draw the first restored tag's windows and PI on top of the init above.
       redrawCacvrSelections(r.loaded_selections);
@@ -455,7 +472,77 @@ $('jsonInput').addEventListener('change', async (e) => {
     appendLog('Reopen error: ' + err.message);
   }
   hideLoading();
-  e.target.value = '';
+}
+
+
+/* ═══════════════════════ DRAG-AND-DROP FILE OPEN ═══════════════════════
+   Drop a recording (.txt/.csv) or a progress file (.json) anywhere on the page
+   to open it, as an alternative to the buttons. A .json reopens progress; a raw
+   recording asks which study mode to use (the two load buttons' distinction). */
+
+function fileExt(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(name || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+// Hold the dropped raw file while the mode modal is open.
+let pendingDropFile = null;
+
+function openDropModeModal(file) {
+  pendingDropFile = file;
+  $('dropModeFile').textContent = `“${file.name}” — load as which study?`;
+  $('dropModeModal').classList.add('active');
+}
+function closeDropModeModal() {
+  $('dropModeModal').classList.remove('active');
+  pendingDropFile = null;
+}
+$('dropModeSerial').addEventListener('click', () => { const f = pendingDropFile; closeDropModeModal(); if (f) loadRawFile(f, 'serial_lvad'); });
+$('dropModeRamps').addEventListener('click',  () => { const f = pendingDropFile; closeDropModeModal(); if (f) loadRawFile(f, 'ramps'); });
+$('dropModeCancel').addEventListener('click', closeDropModeModal);
+$('dropModeModal').addEventListener('click', (e) => { if (e.target === $('dropModeModal')) closeDropModeModal(); });
+
+function handleDroppedFile(file) {
+  if (!file) return;
+  const ext = fileExt(file.name);
+  if (ext === 'json') {
+    reopenFile(file);
+  } else if (ext === 'txt' || ext === 'csv') {
+    openDropModeModal(file);
+  } else {
+    toast(`Can't open “${file.name}” — drop a .txt/.csv recording or a .json progress file`, 'error');
+    appendLog(`Drag-drop: ignored “${file.name}” (unsupported type).`);
+  }
+}
+
+// Highlight the Load Study card while a file is dragged over the window, and
+// swallow the default browser behaviour (which would navigate to the file).
+let dragDepth = 0;
+const dragHasFile = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+
+window.addEventListener('dragenter', (e) => {
+  if (!dragHasFile(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  $('loadCard').classList.add('dragover');
+});
+window.addEventListener('dragover', (e) => {
+  if (!dragHasFile(e)) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+window.addEventListener('dragleave', (e) => {
+  if (!dragHasFile(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) $('loadCard').classList.remove('dragover');
+});
+window.addEventListener('drop', (e) => {
+  if (!dragHasFile(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $('loadCard').classList.remove('dragover');
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  handleDroppedFile(file);
 });
 
 
@@ -1014,44 +1101,45 @@ async function refreshPITrace() {
 
 piChart.onViewChange = schedulePITraceRefresh;
 
-piChart.onBrushChange = (info) => {
-  const has = !!info.hasBrush;
-  $('piNativeBtn').disabled = !has;
-  $('piArtificialBtn').disabled = !has;
-  $('piBrushClearBtn').disabled = !has;
-};
+// Either PI plot (TCD or ABP) can be brushed; a brush enables the same set of
+// actions — commit it as a beat (Native/Artificial) or clean it (Replace with
+// NaN) — and brushing one plot clears the other, so one brush is live at a time.
+function setPiBrushActions(has) {
+  ['piNativeBtn', 'piArtificialBtn', 'piNanBtn', 'piBrushClearBtn']
+    .forEach(id => { $(id).disabled = !has; });
+}
+piChart.onBrushChange    = (info) => setPiBrushActions(!!info.hasBrush);
+piChart.onAbpBrushChange = (info) => setPiBrushActions(!!info.hasBrush);
 
-// Brushing the PI ABP plot arms the delete button for that plot.
-piChart.onAbpBrushChange = (info) => {
-  $('piAbpNanBtn').disabled = !info.hasBrush;
-};
-
-// Delete (NaN) the ABP datapoints brushed on the PI tab's ABP plot. The ABP
-// trace is drawn shifted by abpShift, so map the brushed display-x back to real
-// sample time before deleting; the deletion is on the shared ABP signal so it
-// echoes onto the CA tab too.
-$('piAbpNanBtn').addEventListener('click', async () => {
-  const ab = piChart.activeAbpBrush();
-  if (!ab) { toast('Drag on the ABP plot first', 'info'); return; }
-  const sh = piChart.abpShift || 0;
+// Replace the brushed datapoints with NaN, on whichever PI plot holds the brush.
+// The TCD brush edits env_u; the ABP brush edits abp (its display x is shifted by
+// abpShift, so un-shift to the ABP signal's own sample time first). The deletion
+// is on the shared signal, so it echoes onto the other tabs' matching plots.
+$('piNanBtn').addEventListener('click', async () => {
+  const ab = piChart.activeAnyBrush();
+  if (!ab) { toast('Brush a region on a plot first', 'info'); return; }
+  const isAbp = ab.which === 'abp';
+  const sh = isAbp ? (piChart.abpShift || 0) : 0;
+  const signal = isAbp ? 'abp' : 'env_u';
   const rect = { x_min: ab.rect.x_min - sh, x_max: ab.rect.x_max - sh,
                  y_min: ab.rect.y_min, y_max: ab.rect.y_max };
   showLoading();
   try {
     const res = await api('/api/edit/nan', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signal: 'abp', ranges: [rect] }),
+      body: JSON.stringify({ signal, ranges: [rect] }),
     });
-    piChart.applyNaNLocally();          // gap the ABP plot immediately
-    piChart.clearAbpBrush();
-    broadcastNaN('pi', 'abp', rect);    // echo onto the CA tab's ABP plot
-    $('piAbpNanBtn').disabled = true;
+    piChart.applyNaNLocally();          // gap the brushed plot immediately
+    piChart.clearAllBrush();
+    broadcastNaN('pi', signal, rect);   // echo onto the other tabs' matching plots
+    setPiBrushActions(false);
     await refreshPITrace();
-    appendLog(`PI: Replaced ${res.changed} ABP sample(s) with NaN (applied across all tabs).`);
-    toast(`Replaced ${res.changed} ABP sample(s) with NaN`, 'success');
+    if (signal === 'env_u') { scheduleCaTraceRefresh(); scheduleCvrTraceRefresh(); }
+    appendLog(`PI: Replaced ${res.changed} ${signal} sample(s) with NaN (applied across all tabs).`);
+    toast(`Replaced ${res.changed} sample(s) with NaN`, 'success');
   } catch (err) {
     toast(err.message, 'error');
-    appendLog('PI ABP edit error: ' + err.message);
+    appendLog('PI edit error: ' + err.message);
   }
   hideLoading();
 });
@@ -1074,6 +1162,25 @@ async function refreshCaTrace() {
   }
 }
 caCharts.onViewChange = scheduleCaTraceRefresh;
+
+/* ── CVR TCD plots (meanU, envU) fetch the on-screen slice at the same adaptive
+   resolution as the PI tab, so the TCD waveforms are as detailed as PI/CA ── */
+let cvrTraceTimer = null;
+function scheduleCvrTraceRefresh() {
+  clearTimeout(cvrTraceTimer);
+  cvrTraceTimer = setTimeout(refreshCvrTrace, 150);
+}
+async function refreshCvrTrace() {
+  if (!sessionData) return;
+  const { start, end } = paddedTraceWindow(cvrCharts);
+  try {
+    const d = await api(`/api/pi/trace?start=${start}&end=${end}`);
+    cvrCharts.setTrace(d.time, d.mean_u, d.env_u);
+  } catch (err) {
+    appendLog('CVR trace error: ' + err.message);
+  }
+}
+cvrCharts.onViewChange = scheduleCvrTraceRefresh;
 
 /* ── render server state into chart, counters and the two tables ── */
 let piAbpEpochs = [];
@@ -1200,7 +1307,7 @@ async function initPITab() {
   piChart.setBrushMode(true);
   $('piBrushBtn').textContent = 'Brush: ON';
   $('piBrushBtn').classList.add('btn-primary');
-  ['piNativeBtn', 'piArtificialBtn', 'piBrushClearBtn'].forEach(id => { $(id).disabled = true; });
+  setPiBrushActions(false);
   try {
     renderPI(await api('/api/pi/state'));
   } catch (err) {
@@ -1216,18 +1323,20 @@ $('piBrushBtn').addEventListener('click', () => {
   $('piBrushBtn').textContent = 'Brush: ' + (on ? 'ON' : 'OFF');
   $('piBrushBtn').classList.toggle('btn-primary', on);
   if (!on) {
-    piChart.clearBrush();
-    ['piNativeBtn', 'piArtificialBtn', 'piBrushClearBtn'].forEach(id => { $(id).disabled = true; });
+    piChart.clearAllBrush();
+    setPiBrushActions(false);
   }
   appendLog(`PI: Brush mode ${on ? 'ON' : 'OFF'}.`);
 });
 
-$('piBrushClearBtn').addEventListener('click', () => piChart.clearBrush());
+$('piBrushClearBtn').addEventListener('click', () => piChart.clearAllBrush());
 
-/* ── commit the brushed rectangle as an epoch ── */
+/* ── commit the brushed rectangle as an epoch (from the TCD or the ABP plot) ── */
 async function piSelect(kind) {
-  const ab = piChart.activeBrush();
-  if (!ab) { toast('Brush a region on the plot first', 'info'); return; }
+  const ab = piChart.activeAnyBrush();
+  if (!ab) { toast('Brush a region on a plot first', 'info'); return; }
+  // The ABP plot's display x is already TCD-aligned by the sync shift, so its
+  // rect maps straight onto TCD time — no un-shift needed for beat selection.
   showLoading();
   try {
     const payload = await api('/api/pi/select', {
@@ -1235,7 +1344,7 @@ async function piSelect(kind) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: kind, rect: ab.rect }),
     });
-    piChart.clearBrush();
+    piChart.clearAllBrush();
     renderPI(payload);
     const last = piEpochs[piEpochs.length - 1];
     appendLog(`PI: ${kind} beat #${last.ordinal} — PI = ${fmt(last.pi, 3)}, Pulse Amp = ${fmt(last.pulse_amp)}`);
